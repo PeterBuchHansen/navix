@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED_PATH="$(readlink -f "${SCRIPT_PATH}" 2>/dev/null || true)"
+  if [[ -n "${RESOLVED_PATH}" ]]; then
+    SCRIPT_PATH="${RESOLVED_PATH}"
+  fi
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+detect_launch_shell() {
+  local parent_comm
+  parent_comm="$(ps -p "$PPID" -o comm= 2>/dev/null | tr -d ' ' || true)"
+  if [[ -n "${parent_comm}" ]]; then
+    if command -v "${parent_comm}" >/dev/null 2>&1; then
+      command -v "${parent_comm}"
+      return
+    fi
+  fi
+
+  if [[ -n "${BASH_VERSION:-}" ]] && command -v bash >/dev/null 2>&1; then
+    command -v bash
+    return
+  fi
+  if [[ -n "${ZSH_VERSION:-}" ]] && command -v zsh >/dev/null 2>&1; then
+    command -v zsh
+    return
+  fi
+  if [[ -n "${FISH_VERSION:-}" ]] && command -v fish >/dev/null 2>&1; then
+    command -v fish
+    return
+  fi
+
+  if [[ -n "${SHELL:-}" ]]; then
+    echo "${SHELL}"
+    return
+  fi
+
+  echo "/bin/sh"
+}
+
+NAVIX_LAUNCH_SHELL="$(detect_launch_shell)"
+export NAVIX_LAUNCH_SHELL
+
+if command -v cargo >/dev/null 2>&1; then
+  exec cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" -- "$@"
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Error: cargo not found and docker not installed." >&2
+  exit 127
+fi
+
+BUILD_DIR="${ROOT_DIR}/.navix-build"
+DOCKER_CARGO_ARGS=(build --manifest-path /work/Cargo.toml)
+if [[ -f "${ROOT_DIR}/Cargo.lock" ]]; then
+  DOCKER_CARGO_ARGS+=(--locked)
+fi
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -e CARGO_TARGET_DIR=/work/.navix-build \
+  -v "${ROOT_DIR}:/work" \
+  -w /work \
+  rust:1 \
+  /usr/local/cargo/bin/cargo "${DOCKER_CARGO_ARGS[@]}"
+
+exec "${BUILD_DIR}/debug/navix" "$@"
