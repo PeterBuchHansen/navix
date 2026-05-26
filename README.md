@@ -2,6 +2,11 @@
 
 Keyboard-first Rust TUI for filesystem navigation, preview command routing, and an embedded shell.
 
+## Platform support
+
+- Primary support target: Linux terminal environments.
+- Current implementation relies on Unix/Linux behavior in several runtime paths.
+
 ## Quick start
 
 - Run from repo: `bin/navix`
@@ -79,3 +84,16 @@ This applies to both `Esc+2` and mouse-click focus on preview.
 - Open in-app editor with `Esc+c`
 
 See `docs/CURRENT_BEHAVIOR.md` for details and config editing controls.
+
+## Project docs
+
+- Behavior reference: `docs/CURRENT_BEHAVIOR.md`
+- Architecture notes: `docs/ARCHITECTURE.md`
+- Engineering conventions: `docs/PROJECT_CONVENTIONS.md`
+- Contribution guide: `CONTRIBUTING.md`
+- Security policy: `SECURITY.md`
+- Release checklist: `docs/OPEN_SOURCE_RELEASE.md`
+
+## License
+
+GPL-3.0-or-later. See `LICENSE`.
