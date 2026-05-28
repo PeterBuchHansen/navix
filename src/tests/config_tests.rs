@@ -11,7 +11,11 @@ fn config_panel_text_omits_intro_lines() {
     let rendered: String = text
         .lines
         .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref().to_string()))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     assert!(!rendered.contains("Extension command routing"));
@@ -48,7 +52,11 @@ fn config_panel_text_uses_aligned_extension_block_layout() {
     let rendered: String = text
         .lines
         .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref().to_string()))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     assert!(rendered.contains("Rule:"));
@@ -111,7 +119,11 @@ fn config_panel_text_extension_edit_is_in_place_with_fixed_dot_prefix() {
     let rendered: String = text
         .lines
         .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref().to_string()))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     assert!(!rendered.contains("edit extension:"));
@@ -149,7 +161,11 @@ fn config_unsaved_line_shows_save_shortcut() {
     let rendered: String = text
         .lines
         .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref().to_string()))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     assert!(rendered.contains("Unsaved changes*"));
@@ -201,7 +217,8 @@ fn config_unsaved_deleted_rule_stays_visible_in_red() {
         exec_line
             .spans
             .iter()
-            .any(|span| span.content.as_ref() == "mdterm {file}" && span.style.fg == Some(Color::Red))
+            .any(|span| span.content.as_ref() == "mdterm {file}"
+                && span.style.fg == Some(Color::Red))
     );
 }
 
@@ -223,7 +240,9 @@ fn config_unsaved_added_rule_is_green_on_all_fields() {
         .lines
         .iter()
         .position(|line| {
-            line.spans.iter().any(|span| span.content.as_ref() == ".toml")
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref() == ".toml")
                 && line
                     .spans
                     .iter()
@@ -239,10 +258,9 @@ fn config_unsaved_added_rule_is_green_on_all_fields() {
     );
     let read_line = &text.lines[added_idx + 1];
     assert!(
-        read_line
-            .spans
-            .iter()
-            .any(|span| span.content.as_ref() == "bat {file}" && span.style.fg == Some(Color::Green))
+        read_line.spans.iter().any(
+            |span| span.content.as_ref() == "bat {file}" && span.style.fg == Some(Color::Green)
+        )
     );
     let write_line = &text.lines[added_idx + 2];
     assert!(write_line.spans.iter().any(|span| {
@@ -262,7 +280,7 @@ fn config_unsaved_readded_extension_shows_partial_field_diff() {
         extension: "md".to_string(),
         read_cmd: "bat {file}".to_string(),
         write_cmd: "$EDITOR {file}".to_string(),
-        exec_cmd: "--".to_string(),
+        exec_cmd: "None".to_string(),
     });
     let mut editor = ConfigEditor::default();
     editor.selected_rule = 0;
@@ -288,11 +306,9 @@ fn config_unsaved_readded_extension_shows_partial_field_diff() {
             .any(|span| span.content.as_ref() == ".md" && span.style.fg == Some(Color::LightBlue))
     );
     let read_line = &text.lines[md_idx + 1];
-    assert!(
-        read_line.spans.iter().any(|span| {
-            span.content.as_ref() == "bat {file}" && span.style.fg == Some(Color::LightBlue)
-        })
-    );
+    assert!(read_line.spans.iter().any(|span| {
+        span.content.as_ref() == "bat {file}" && span.style.fg == Some(Color::LightBlue)
+    }));
     let write_line = &text.lines[md_idx + 2];
     assert!(write_line.spans.iter().any(|span| {
         span.content.as_ref() == "$EDITOR {file}" && span.style.fg == Some(Color::LightBlue)
@@ -305,7 +321,7 @@ fn config_unsaved_readded_extension_shows_partial_field_diff() {
         exec_line
             .spans
             .iter()
-            .any(|span| span.content.as_ref() == "+ --" && span.style.fg == Some(Color::Green))
+            .any(|span| span.content.as_ref() == "+ None" && span.style.fg == Some(Color::Green))
     );
 }
 
@@ -327,7 +343,11 @@ fn config_unsaved_deleted_rules_render_even_when_current_is_empty() {
     let rendered: String = text
         .lines
         .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref().to_string()))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     assert!(!rendered.contains("(no extension rules yet - press Ctrl+n to add one)"));
@@ -352,6 +372,7 @@ fn config_normalize_migrates_old_bat_paging_flag() {
     config.normalize();
     assert_eq!(config.extension_rules[0].extension, "md");
     assert_eq!(config.extension_rules[0].read_cmd, "bat {file}");
+    assert_eq!(config.extension_rules[0].exec_cmd, "None");
 }
 
 #[test]
@@ -360,7 +381,7 @@ fn default_extension_rule_has_safe_exec_placeholder() {
     assert_eq!(rule.extension, "new");
     assert_eq!(rule.read_cmd, "bat {file}");
     assert_eq!(rule.write_cmd, "$EDITOR {file}");
-    assert_eq!(rule.exec_cmd, "--");
+    assert_eq!(rule.exec_cmd, "None");
 }
 
 #[test]

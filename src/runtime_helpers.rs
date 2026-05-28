@@ -17,7 +17,11 @@
 use super::*;
 
 #[cfg(test)]
-pub(crate) fn window_bounds(content_end: usize, viewport: usize, scroll_offset: usize) -> (usize, usize, usize) {
+pub(crate) fn window_bounds(
+    content_end: usize,
+    viewport: usize,
+    scroll_offset: usize,
+) -> (usize, usize, usize) {
     let viewport = viewport.max(1);
     let content_end = content_end.max(1).max(viewport);
     let max_offset = content_end.saturating_sub(viewport);
@@ -37,13 +41,15 @@ pub(crate) fn visible_range(total: usize, viewport: usize, scroll_offset: usize)
     let max_offset = total.saturating_sub(viewport);
     let clamped_offset = scroll_offset.min(max_offset);
     let shown_end = total.saturating_sub(clamped_offset);
-    let shown_start = shown_end
-        .saturating_sub(viewport.saturating_sub(1))
-        .max(1);
+    let shown_start = shown_end.saturating_sub(viewport.saturating_sub(1)).max(1);
     (shown_start, shown_end.max(shown_start))
 }
 
-pub(crate) fn shell_panel_height(total_main_height: u16, active: ActivePane, shell_fullish: bool) -> u16 {
+pub(crate) fn shell_panel_height(
+    total_main_height: u16,
+    active: ActivePane,
+    shell_fullish: bool,
+) -> u16 {
     if active == ActivePane::Shell && shell_fullish {
         return total_main_height.saturating_sub(4).max(1);
     }
@@ -74,8 +80,10 @@ pub(crate) fn is_fullish_layout_state(
     nav_fullish: bool,
     preview_overlay_active: bool,
 ) -> bool {
-    let shell_fullish_mode = is_fullish_shell_mode(active, shell_fullish_toggle || shell_alt_screen_active);
-    let nav_fullish_mode = matches!(active, ActivePane::Navigation | ActivePane::Preview) && nav_fullish;
+    let shell_fullish_mode =
+        is_fullish_shell_mode(active, shell_fullish_toggle || shell_alt_screen_active);
+    let nav_fullish_mode =
+        matches!(active, ActivePane::Navigation | ActivePane::Preview) && nav_fullish;
     shell_fullish_mode || nav_fullish_mode || preview_overlay_active
 }
 

@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use super::*;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -116,7 +116,7 @@ impl ShellPane {
                     Ok(0) => break,
                     Ok(n) => {
                         let _ = tx.send(buf[..n].to_vec());
-                    }
+                    },
                     Err(_) => break,
                 }
             }
@@ -156,7 +156,7 @@ impl ShellPane {
                     processed_chunks = processed_chunks.saturating_add(1);
                     self.track_alt_screen_sequences(&chunk);
                     self.parser.process(&chunk);
-                }
+                },
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
@@ -182,7 +182,13 @@ impl ShellPane {
         self.has_overflow = max_scrollback > 0;
 
         let mut bytes: Vec<u8> = Vec::new();
-        for (idx, row) in self.parser.screen().rows_formatted(0, cols).into_iter().enumerate() {
+        for (idx, row) in self
+            .parser
+            .screen()
+            .rows_formatted(0, cols)
+            .into_iter()
+            .enumerate()
+        {
             if idx > 0 {
                 bytes.extend_from_slice(b"\x1b[0m");
                 bytes.push(b'\n');
@@ -240,9 +246,9 @@ impl ShellPane {
         Ok(())
     }
 
-    pub(crate) fn cd_to(&mut self, path: &Path) -> io::Result<()> {
-        let command = format!("cd -- {}\r", shell_single_quote(path.to_string_lossy().as_ref()));
-        self.send_raw(command.as_bytes())?;
+    pub(crate) fn cd_to(&mut self, path: &Path, restore_pending_input: bool) -> io::Result<()> {
+        let bytes = cd_to_bytes(path, restore_pending_input);
+        self.send_raw(&bytes)?;
         self.last_known_cwd = path.to_path_buf();
         Ok(())
     }
@@ -320,7 +326,10 @@ impl ShellPane {
             return None;
         }
         let (row, col) = self.parser.screen().cursor_position();
-        Some((row.min(viewport_rows.saturating_sub(1)), col.min(cols.saturating_sub(1))))
+        Some((
+            row.min(viewport_rows.saturating_sub(1)),
+            col.min(cols.saturating_sub(1)),
+        ))
     }
 
     pub(crate) fn current_cwd(&mut self) -> PathBuf {
@@ -345,6 +354,22 @@ pub(crate) fn shell_single_quote(input: &str) -> String {
     format!("'{}'", input.replace('\'', "'\\''"))
 }
 
+pub(crate) fn cd_to_bytes(path: &Path, restore_pending_input: bool) -> Vec<u8> {
+    let command = format!(
+        "cd -- {}\r",
+        shell_single_quote(path.to_string_lossy().as_ref())
+    );
+    let mut out = Vec::with_capacity(command.len().saturating_add(3));
+    // Clear current prompt input before running cd, so typed text does not prefix the command.
+    out.extend_from_slice(&[0x01, 0x0b]);
+    out.extend_from_slice(command.as_bytes());
+    if restore_pending_input {
+        // Yank previously cleared input back onto the new prompt after cd runs.
+        out.push(0x19);
+    }
+    out
+}
+
 pub(crate) fn shell_program_name(shell_path: &str) -> String {
     Path::new(shell_path)
         .file_name()
@@ -355,7 +380,10 @@ pub(crate) fn shell_program_name(shell_path: &str) -> String {
 
 pub(crate) fn bash_history_sync_prompt_command(existing_prompt_command: Option<&str>) -> String {
     let sync = "history -a; history -n";
-    let Some(existing) = existing_prompt_command.map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(existing) = existing_prompt_command
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return sync.to_string();
     };
     if existing.contains("history -n") && existing.contains("history -a") {
@@ -366,7 +394,9 @@ pub(crate) fn bash_history_sync_prompt_command(existing_prompt_command: Option<&
 }
 
 pub(crate) fn default_history_file_for_shell(shell_path: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok().filter(|value| !value.is_empty())?;
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|value| !value.is_empty())?;
     let shell_name = shell_program_name(shell_path);
     let mut candidates: Vec<String> = Vec::new();
     match shell_name.as_str() {
@@ -374,20 +404,22 @@ pub(crate) fn default_history_file_for_shell(shell_path: &str) -> Option<String>
         "zsh" => {
             candidates.push(format!("{home}/.zhistory"));
             candidates.push(format!("{home}/.zsh_history"));
-            if let Some(state_home) =
-                std::env::var("XDG_STATE_HOME").ok().filter(|value| !value.is_empty())
+            if let Some(state_home) = std::env::var("XDG_STATE_HOME")
+                .ok()
+                .filter(|value| !value.is_empty())
             {
                 candidates.push(format!("{state_home}/zsh/history"));
             }
-        }
+        },
         "fish" => {
-            if let Some(data_home) =
-                std::env::var("XDG_DATA_HOME").ok().filter(|value| !value.is_empty())
+            if let Some(data_home) = std::env::var("XDG_DATA_HOME")
+                .ok()
+                .filter(|value| !value.is_empty())
             {
                 candidates.push(format!("{data_home}/fish/fish_history"));
             }
             candidates.push(format!("{home}/.local/share/fish/fish_history"));
-        }
+        },
         _ => candidates.push(format!("{home}/.sh_history")),
     }
     candidates
@@ -423,7 +455,7 @@ fn apply_history_defaults(command: &mut CommandBuilder, shell_program: &str, she
             if std::env::var("HISTFILESIZE").is_err() {
                 command.env("HISTFILESIZE", "200000");
             }
-        }
+        },
         "zsh" => {
             if std::env::var("HISTSIZE").is_err() {
                 command.env("HISTSIZE", "100000");
@@ -431,8 +463,8 @@ fn apply_history_defaults(command: &mut CommandBuilder, shell_program: &str, she
             if std::env::var("SAVEHIST").is_err() {
                 command.env("SAVEHIST", "100000");
             }
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 

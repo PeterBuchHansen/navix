@@ -10,7 +10,10 @@ fn terminal_key_bytes_supports_alt_char() {
 
 #[test]
 fn terminal_key_bytes_supports_home_end_delete_and_function_keys() {
-    assert_eq!(terminal_key_bytes(KeyCode::Home, KeyModifiers::NONE), b"\x1b[H");
+    assert_eq!(
+        terminal_key_bytes(KeyCode::Home, KeyModifiers::NONE),
+        b"\x1b[H"
+    );
     assert_eq!(
         terminal_key_bytes(KeyCode::Home, KeyModifiers::CONTROL),
         b"\x1b[1;5H"
@@ -19,12 +22,18 @@ fn terminal_key_bytes_supports_home_end_delete_and_function_keys() {
         terminal_key_bytes(KeyCode::Delete, KeyModifiers::SHIFT | KeyModifiers::ALT),
         b"\x1b[3;4~"
     );
-    assert_eq!(terminal_key_bytes(KeyCode::F(1), KeyModifiers::NONE), b"\x1bOP");
+    assert_eq!(
+        terminal_key_bytes(KeyCode::F(1), KeyModifiers::NONE),
+        b"\x1bOP"
+    );
     assert_eq!(
         terminal_key_bytes(KeyCode::F(5), KeyModifiers::CONTROL),
         b"\x1b[15;5~"
     );
-    assert_eq!(terminal_key_bytes(KeyCode::BackTab, KeyModifiers::NONE), b"\x1b[Z");
+    assert_eq!(
+        terminal_key_bytes(KeyCode::BackTab, KeyModifiers::NONE),
+        b"\x1b[Z"
+    );
 }
 
 #[test]

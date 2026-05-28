@@ -68,6 +68,31 @@ pub(crate) fn open_key_debug_log() -> Option<File> {
     Some(file)
 }
 
+pub(crate) fn open_copy_key_debug_log() -> Option<File> {
+    let enabled = std::env::var("NAVIX_COPY_KEY_DEBUG")
+        .ok()
+        .map(|value| {
+            let lowered = value.trim().to_ascii_lowercase();
+            lowered == "1" || lowered == "true" || lowered == "yes"
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let path = std::env::var("NAVIX_COPY_KEY_DEBUG_FILE")
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+        .unwrap_or_else(|| "/tmp/navix-copy-key-debug.log".to_string());
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let _ = writeln!(file, "---- navix copy-key debug session ----");
+    let _ = file.flush();
+    Some(file)
+}
+
 pub(crate) struct TerminalGuard {
     pub(crate) terminal: Terminal<CrosstermBackend<io::Stdout>>,
     mouse_capture_enabled: bool,

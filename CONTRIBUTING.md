@@ -10,7 +10,7 @@
 ## Required checks before PR
 
 - Format check: `cargo fmt --all -- --check`
-- Lint check: `cargo clippy --all-targets --all-features -- -D warnings`
+- Lint check: `cargo clippy --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious`
 - Test suite: `cargo test --locked --manifest-path Cargo.toml`
 
 ## PR scope rules

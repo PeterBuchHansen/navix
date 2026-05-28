@@ -14,7 +14,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-pub(crate) fn apply_alt_screen_chunk(current_state: bool, tail: &mut Vec<u8>, chunk: &[u8]) -> bool {
+pub(crate) fn apply_alt_screen_chunk(
+    current_state: bool,
+    tail: &mut Vec<u8>,
+    chunk: &[u8],
+) -> bool {
     const ALT_SEQ_MAX_LEN: usize = 8;
     let mut merged = Vec::with_capacity(tail.len() + chunk.len());
     merged.extend_from_slice(tail);

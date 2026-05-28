@@ -16,7 +16,10 @@
 
 use super::*;
 
-pub(crate) fn preview_content_for_selected_entry(entry: Option<&NavEntry>, depth: usize) -> (PreviewMode, String) {
+pub(crate) fn preview_content_for_selected_entry(
+    entry: Option<&NavEntry>,
+    depth: usize,
+) -> (PreviewMode, String) {
     let Some(selected) = entry else {
         return (PreviewMode::Empty, String::new());
     };
@@ -62,9 +65,12 @@ pub(crate) fn navigation_file_command_action(
         return None;
     }
     let trigger = key.to_ascii_lowercase();
-    let command = available_preview_file_commands(entry, config, editor_program, identity)
+    let command = preview_file_command_entries(entry, config, editor_program, identity)
         .into_iter()
-        .find_map(|(shortcut, command)| (shortcut == trigger).then_some(command))?;
+        .find_map(|(shortcut, command, enabled)| {
+            (shortcut == trigger && enabled).then_some(command)
+        })
+        .filter(|command| !command_disabled(command))?;
     match trigger {
         'r' => Some(NavigationFileCommandAction::RunReadInPreview(command)),
         'w' => Some(NavigationFileCommandAction::RunWriteInPreview(command)),
@@ -73,12 +79,25 @@ pub(crate) fn navigation_file_command_action(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn available_preview_file_commands(
     entry: &NavEntry,
     config: &ConfigState,
     editor_program: &str,
     identity: &EffectiveIdentity,
 ) -> Vec<(char, String)> {
+    preview_file_command_entries(entry, config, editor_program, identity)
+        .into_iter()
+        .filter_map(|(shortcut, command, enabled)| enabled.then_some((shortcut, command)))
+        .collect()
+}
+
+pub(crate) fn preview_file_command_entries(
+    entry: &NavEntry,
+    config: &ConfigState,
+    editor_program: &str,
+    identity: &EffectiveIdentity,
+) -> Vec<(char, String, bool)> {
     if entry.is_dir {
         return Vec::new();
     }
@@ -96,31 +115,57 @@ pub(crate) fn available_preview_file_commands(
     let rule = matched_rule.unwrap_or(&fallback_rule);
 
     let access = effective_access_for_entry(entry, identity);
-    let mut out = Vec::new();
-    if command_enabled_for_file(&rule.read_cmd) && access.read {
-        out.push((
-            'r',
-            resolve_preview_command_template(&rule.read_cmd, &entry.name, editor_program),
-        ));
-    }
-    if command_enabled_for_file(&rule.write_cmd) && access.write {
-        out.push((
-            'w',
-            resolve_preview_command_template(&rule.write_cmd, &entry.name, editor_program),
-        ));
-    }
-    if command_enabled_for_file(&rule.exec_cmd) && access.exec {
-        out.push((
-            'x',
-            resolve_preview_command_template(&rule.exec_cmd, &entry.name, editor_program),
-        ));
-    }
+    let mut out = Vec::with_capacity(3);
+    out.push(preview_file_command_entry(
+        'r',
+        &rule.read_cmd,
+        access.read,
+        &entry.name,
+        editor_program,
+    ));
+    out.push(preview_file_command_entry(
+        'w',
+        &rule.write_cmd,
+        access.write,
+        &entry.name,
+        editor_program,
+    ));
+    out.push(preview_file_command_entry(
+        'x',
+        &rule.exec_cmd,
+        access.exec,
+        &entry.name,
+        editor_program,
+    ));
     out
 }
 
+fn preview_file_command_entry(
+    shortcut: char,
+    template: &str,
+    allowed_by_permissions: bool,
+    file_name: &str,
+    editor_program: &str,
+) -> (char, String, bool) {
+    let enabled = command_enabled_for_file(template) && allowed_by_permissions;
+    let command = preview_command_display(template, file_name, editor_program);
+    (shortcut, command, enabled)
+}
+
+fn command_disabled(command: &str) -> bool {
+    let trimmed = command.trim();
+    trimmed.is_empty() || trimmed == "--" || trimmed.eq_ignore_ascii_case("none")
+}
+
 fn command_enabled_for_file(template: &str) -> bool {
-    let trimmed = template.trim();
-    !trimmed.is_empty() && trimmed != "--"
+    !command_disabled(template)
+}
+
+fn preview_command_display(template: &str, file_name: &str, editor_program: &str) -> String {
+    if command_disabled(template) {
+        return "None".to_string();
+    }
+    resolve_preview_command_template(template.trim(), file_name, editor_program)
 }
 
 pub(crate) fn resolve_preview_command_template(
@@ -152,7 +197,12 @@ pub(crate) fn preview_directory_entries(path: &Path) -> io::Result<Vec<NavEntry>
 
 pub(crate) fn preview_directory_tree_lines(root: &Path, depth: usize) -> Vec<String> {
     let mut lines = vec![format!("{}", root.display())];
-    append_preview_directory_level(root, "", clamp_preview_depth(depth, depth.max(1)), &mut lines);
+    append_preview_directory_level(
+        root,
+        "",
+        clamp_preview_depth(depth, depth.max(1)),
+        &mut lines,
+    );
     lines
 }
 
@@ -170,7 +220,7 @@ fn append_preview_directory_level(
         Err(err) => {
             lines.push(format!("{prefix}└── error: {err}"));
             return;
-        }
+        },
     };
     if entries.is_empty() {
         lines.push(format!("{prefix}└── (empty)"));
@@ -214,7 +264,13 @@ fn effective_access_for_entry(entry: &NavEntry, identity: &EffectiveIdentity) ->
     if let Some(access) = kernel_effective_access_for_path(&entry.path) {
         access
     } else {
-        effective_access_from_mode(entry.mode, entry.uid, entry.gid, entry.file_type_char, identity)
+        effective_access_from_mode(
+            entry.mode,
+            entry.uid,
+            entry.gid,
+            entry.file_type_char,
+            identity,
+        )
     }
 }
 
@@ -244,7 +300,7 @@ fn syscall_path_access(path: &Path, mode: i32) -> io::Result<bool> {
                 || code == libc::ELOOP =>
         {
             Ok(false)
-        }
+        },
         _ => Err(err),
     }
 }

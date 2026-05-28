@@ -1,8 +1,8 @@
 [package]
 name = "navix"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Keyboard-first Rust TUI for file navigation, preview overlays, and embedded shell workflows."
 readme = "README.md"
 license = "GPL-3.0-or-later"

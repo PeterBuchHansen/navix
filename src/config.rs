@@ -58,6 +58,15 @@ impl Default for ConfigState {
 }
 
 impl ConfigState {
+    fn normalize_command_template(template: &str) -> String {
+        let trimmed = template.trim();
+        if trimmed == "--" || trimmed.eq_ignore_ascii_case("none") {
+            "None".to_string()
+        } else {
+            template.to_string()
+        }
+    }
+
     pub(crate) fn config_file_path() -> PathBuf {
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
             if !xdg.trim().is_empty() {
@@ -66,7 +75,10 @@ impl ConfigState {
         }
         if let Ok(home) = std::env::var("HOME") {
             if !home.trim().is_empty() {
-                return PathBuf::from(home).join(".config").join("navix").join("config.toml");
+                return PathBuf::from(home)
+                    .join(".config")
+                    .join("navix")
+                    .join("config.toml");
             }
         }
         PathBuf::from("navix-config.toml")
@@ -111,6 +123,9 @@ impl ConfigState {
             if rule.read_cmd.trim() == "bat --paging=never {file}" {
                 rule.read_cmd = "bat {file}".to_string();
             }
+            rule.read_cmd = Self::normalize_command_template(&rule.read_cmd);
+            rule.write_cmd = Self::normalize_command_template(&rule.write_cmd);
+            rule.exec_cmd = Self::normalize_command_template(&rule.exec_cmd);
         }
     }
 }
@@ -182,7 +197,8 @@ impl ConfigEditor {
         self.selected_rule = if config.extension_rules.is_empty() {
             0
         } else {
-            self.selected_rule.min(config.extension_rules.len().saturating_sub(1))
+            self.selected_rule
+                .min(config.extension_rules.len().saturating_sub(1))
         };
     }
 
