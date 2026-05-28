@@ -38,7 +38,10 @@ pub(crate) fn navigation_entries(cwd: &Path) -> io::Result<Vec<NavEntry>> {
         .map(|entry| {
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path).ok();
-            let is_dir = metadata.as_ref().map(|m| m.file_type().is_dir()).unwrap_or(false);
+            let is_dir = metadata
+                .as_ref()
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(false);
             let is_symlink = metadata
                 .as_ref()
                 .map(|m| m.file_type().is_symlink())
@@ -56,7 +59,10 @@ pub(crate) fn navigation_entries(cwd: &Path) -> io::Result<Vec<NavEntry>> {
                     }
                 })
                 .unwrap_or('?');
-            let mode = metadata.as_ref().map(|m| m.permissions().mode()).unwrap_or(0);
+            let mode = metadata
+                .as_ref()
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0);
             let nlink = metadata.as_ref().map(|m| m.nlink()).unwrap_or(0);
             let uid = metadata.as_ref().map(|m| m.uid()).unwrap_or(0);
             let gid = metadata.as_ref().map(|m| m.gid()).unwrap_or(0);
@@ -147,12 +153,18 @@ pub(crate) fn nav_filter_matches(name: &str, filter: &str) -> bool {
     }
 }
 
-pub(crate) fn nav_selection_after_filter(entries: &[NavEntry], selected: usize, filter: &str) -> usize {
+pub(crate) fn nav_selection_after_filter(
+    entries: &[NavEntry],
+    selected: usize,
+    filter: &str,
+) -> usize {
     let selected = clamp_nav_selection(selected, entries.len());
     if filter.is_empty() {
         return selected;
     }
-    if entries.get(selected).is_some_and(|entry| entry.name == "..")
+    if entries
+        .get(selected)
+        .is_some_and(|entry| entry.name == "..")
         && let Some(first_real_entry) = entries.iter().position(|entry| entry.name != "..")
     {
         return first_real_entry;
@@ -224,7 +236,9 @@ pub(crate) fn navigation_panel_text(
     lines.push(Line::from(Span::styled(
         format!("{}", cwd.display()),
         nav_style_for_theme(
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
             fullish_shell_theme,
         ),
     )));
@@ -284,11 +298,17 @@ pub(crate) fn navigation_panel_text(
             ),
             Span::styled(
                 format!("{icon} "),
-                nav_row_selected_style(nav_style_for_theme(name_style, fullish_shell_theme), is_selected),
+                nav_row_selected_style(
+                    nav_style_for_theme(name_style, fullish_shell_theme),
+                    is_selected,
+                ),
             ),
             Span::styled(
                 name,
-                nav_row_selected_style(nav_style_for_theme(name_style, fullish_shell_theme), is_selected),
+                nav_row_selected_style(
+                    nav_style_for_theme(name_style, fullish_shell_theme),
+                    is_selected,
+                ),
             ),
         ]));
     }
@@ -306,7 +326,7 @@ pub(crate) fn navigation_tree_lines(cwd: &Path) -> Vec<String> {
         Err(err) => {
             lines.push(format!("└── error: {err}"));
             return lines;
-        }
+        },
     };
 
     if entries.is_empty() {

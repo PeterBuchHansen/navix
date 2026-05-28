@@ -55,7 +55,8 @@ impl LsColorsTheme {
                     continue;
                 }
                 let suffix = format!(".{}", raw_suffix.to_ascii_lowercase());
-                self.suffix_styles.retain(|(existing, _)| existing != &suffix);
+                self.suffix_styles
+                    .retain(|(existing, _)| existing != &suffix);
                 self.suffix_styles.push((suffix, style));
             } else {
                 self.type_styles.insert(key, style);
@@ -63,7 +64,13 @@ impl LsColorsTheme {
         }
     }
 
-    pub(crate) fn style_for_entry(&self, name: &str, is_dir: bool, is_symlink: bool, mode: u32) -> Style {
+    pub(crate) fn style_for_entry(
+        &self,
+        name: &str,
+        is_dir: bool,
+        is_symlink: bool,
+        mode: u32,
+    ) -> Style {
         if is_dir {
             return self.type_style("di");
         }
@@ -117,7 +124,7 @@ pub(crate) fn nav_style_for_theme(style: Style, fullish_shell_theme: bool) -> St
 
 pub(crate) fn nav_row_selected_style(style: Style, selected: bool) -> Style {
     if selected {
-        style.bg(Color::LightBlue).fg(Color::Black)
+        style.bg(Color::Yellow).fg(Color::Black)
     } else {
         style
     }
@@ -142,7 +149,7 @@ pub(crate) fn sgr_to_style(raw: &str) -> Style {
                 fg = None;
                 bold = false;
                 underlined = false;
-            }
+            },
             1 => bold = true,
             4 => underlined = true,
             22 => bold = false,
@@ -162,8 +169,8 @@ pub(crate) fn sgr_to_style(raw: &str) -> Style {
                     ));
                     idx += 4;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         idx += 1;
     }

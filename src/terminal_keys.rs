@@ -60,7 +60,7 @@ fn function_key_sequence(number: u8, modifiers: KeyModifiers) -> Option<Vec<u8>>
             } else {
                 Some(vec![0x1b, b'O', letter])
             }
-        }
+        },
         5 => Some(csi_tilde_sequence(15, modifiers)),
         6 => Some(csi_tilde_sequence(17, modifiers)),
         7 => Some(csi_tilde_sequence(18, modifiers)),
@@ -89,7 +89,7 @@ pub(crate) fn terminal_key_bytes(code: KeyCode, modifiers: KeyModifiers) -> Vec<
                 bytes.extend_from_slice(encoded.as_bytes());
             }
             bytes
-        }
+        },
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => {
             if modifiers.contains(KeyModifiers::ALT) {
@@ -97,14 +97,14 @@ pub(crate) fn terminal_key_bytes(code: KeyCode, modifiers: KeyModifiers) -> Vec<
             } else {
                 vec![0x7f]
             }
-        }
+        },
         KeyCode::Tab => {
             if modifiers.contains(KeyModifiers::SHIFT) {
                 vec![0x1b, b'[', b'Z']
             } else {
                 vec![b'\t']
             }
-        }
+        },
         KeyCode::BackTab => vec![0x1b, b'[', b'Z'],
         KeyCode::Esc => vec![0x1b],
         KeyCode::Up => csi_letter_sequence(b'A', modifiers),

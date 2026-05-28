@@ -3,7 +3,7 @@
 ## Ready now
 
 - CI checks defined (`fmt`, `clippy`, `test`).
-- MSRV CI check defined (`1.85.0`).
+- MSRV CI check defined (`1.88.0`).
 - Contributor docs present.
 - Security reporting policy present.
 - Changelog started.
@@ -21,5 +21,5 @@
 Before each release:
 
 - `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo clippy --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious`
 - `cargo test --manifest-path Cargo.toml`

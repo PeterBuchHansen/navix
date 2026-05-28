@@ -3,12 +3,14 @@ use super::*;
 #[test]
 fn footer_shortcuts_for_shell_use_escape_sequences() {
     let shortcuts = footer_shortcuts(ActivePane::Shell, false, false);
+    assert!(shortcuts.starts_with("Help: Esc+?"));
     assert!(shortcuts.contains("Esc+0"));
     assert!(shortcuts.contains("Esc+1"));
     assert!(shortcuts.contains("Esc+2"));
     assert!(shortcuts.contains("Config: Esc+c"));
     assert!(shortcuts.contains("Esc+↑/Esc+↓"));
     assert!(shortcuts.contains("Esc+f"));
+    assert!(shortcuts.contains("Help: Esc+?"));
     assert!(shortcuts.contains("Exit: Ctrl+d"));
     assert!(!shortcuts.contains("Esc+q"));
 }
@@ -16,14 +18,18 @@ fn footer_shortcuts_for_shell_use_escape_sequences() {
 #[test]
 fn footer_shortcuts_for_non_shell_use_direct_numbers() {
     let shortcuts = footer_shortcuts(ActivePane::Navigation, false, false);
+    assert!(shortcuts.starts_with("Help: Esc+?"));
     assert!(shortcuts.contains("Shell: Esc+0"));
     assert!(shortcuts.contains("Navigation: Esc+1"));
     assert!(shortcuts.contains("Preview: Esc+2"));
     assert!(shortcuts.contains("Config: Esc+c"));
-    assert!(shortcuts.contains("Full: Esc+f"));
+    assert!(shortcuts.contains("Expand view: Esc+f"));
+    assert!(shortcuts.contains("Help: Esc+?"));
+    assert!(shortcuts.contains("Scroll-Select:"));
     assert!(shortcuts.contains("↑/↓"));
     assert!(shortcuts.contains("Home/End"));
     assert!(shortcuts.contains("←/→"));
+    assert!(!shortcuts.contains("Go-out:"));
     assert!(shortcuts.contains("Exit: Ctrl+d"));
     assert!(!shortcuts.contains("Ctrl+d/q"));
 }
@@ -31,10 +37,12 @@ fn footer_shortcuts_for_non_shell_use_direct_numbers() {
 #[test]
 fn footer_shortcuts_for_preview_keep_basic_scroll_shortcuts() {
     let shortcuts = footer_shortcuts(ActivePane::Preview, false, false);
+    assert!(shortcuts.starts_with("Help: Esc+?"));
+    assert!(shortcuts.contains("Help: Esc+?"));
     assert!(shortcuts.contains("PgUp/PgDown"));
     assert!(shortcuts.contains("↑/↓"));
     assert!(!shortcuts.contains("Home/End"));
-    assert!(!shortcuts.contains("←/→"));
+    assert!(!shortcuts.contains("Go-out:"));
 }
 
 #[test]
@@ -47,6 +55,175 @@ fn footer_shortcuts_for_config_overlay_show_editor_commands() {
     assert!(!shortcuts.contains("Rule: "));
     assert!(!shortcuts.contains("Field: "));
     assert!(!shortcuts.contains("Config: "));
+}
+
+#[test]
+fn help_panel_text_shows_updated_navigation_file_shortcuts() {
+    let colors = LsColorsTheme::fallback();
+    let text = help_panel_text(ActivePane::Navigation, &colors);
+    let rendered_lines = text
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>();
+    assert!(
+        rendered_lines
+            .iter()
+            .any(|line| line.contains("d---  Enter") && line.contains(": Directory cd"))
+    );
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("Ctrl+↑ / Ctrl+↓")
+            && line.contains(": Scroll viewport without changing selection")
+    }));
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("Ctrl+Backspace / Ctrl+Delete") && line.contains(": Clear filter")
+    }));
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("-r--  r+Enter / Esc+r / Enter")
+            && line.contains(": File read command shortcut")
+    }));
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("--w-  w+Enter / Esc+w") && line.contains(": File write command shortcut")
+    }));
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("---x  x+Enter / Esc+x") && line.contains(": File execute command shortcut")
+    }));
+}
+
+#[test]
+fn help_panel_directory_icon_uses_navigation_directory_color() {
+    let mut colors = LsColorsTheme::fallback();
+    colors.apply("di=01;35");
+    let text = help_panel_text(ActivePane::Navigation, &colors);
+    let icon_span = text
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "")
+        .expect("directory icon span");
+    let expected = navigation_name_style(&colors, "docs", true, false, 0o755);
+    assert_eq!(icon_span.style, expected);
+}
+
+#[test]
+fn help_panel_text_shows_preview_path_input_context() {
+    let colors = LsColorsTheme::fallback();
+    let text = help_panel_text(ActivePane::Preview, &colors);
+    let rendered_lines = text
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>();
+    assert!(
+        rendered_lines
+            .iter()
+            .any(|line| line.contains("<path typing>"))
+    );
+    assert!(
+        rendered_lines
+            .iter()
+            .any(|line| line.contains("Ctrl+Shift+C") && line.contains(": Copy selected text"))
+    );
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("Tab / Shift+Tab") && line.contains(": Cycle completion forward/reverse")
+    }));
+    assert!(
+        rendered_lines
+            .iter()
+            .any(|line| line.contains("<history selection>"))
+    );
+    assert!(
+        rendered_lines
+            .iter()
+            .any(|line| { line.contains("↑ / ↓") && line.contains(": Rotate history") })
+    );
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("Ctrl+c") && line.contains(": Clear input field and reset completion")
+    }));
+    assert!(rendered_lines.iter().any(|line| {
+        line.contains("Shift+Enter") && line.contains(": Jump but keep focus in Preview")
+    }));
+}
+
+#[test]
+fn help_panel_text_places_active_panel_section_first_and_keeps_white_header() {
+    let colors = LsColorsTheme::fallback();
+    let text = help_panel_text(ActivePane::Preview, &colors);
+    let rendered_lines = text
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>();
+    let preview_idx = rendered_lines
+        .iter()
+        .position(|line| line.contains("Preview Panel shortcuts"))
+        .expect("preview panel section header");
+    let global_idx = rendered_lines
+        .iter()
+        .position(|line| line.contains("Global shortcuts"))
+        .expect("global shortcuts header");
+    let shell_idx = rendered_lines
+        .iter()
+        .position(|line| line.contains("Shell Panel shortcuts"))
+        .expect("shell panel section header");
+    let navigation_idx = rendered_lines
+        .iter()
+        .position(|line| line.contains("Navigation Panel shortcuts"))
+        .expect("navigation panel section header");
+    assert!(preview_idx < global_idx);
+    assert!(global_idx < shell_idx);
+    assert!(global_idx < navigation_idx);
+    let preview_header = text
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "Preview Panel shortcuts")
+        .expect("preview header span");
+    assert_eq!(preview_header.style.fg, Some(Color::White));
+}
+
+#[test]
+fn help_panel_text_uses_underlined_section_headers_and_bold_input_headers() {
+    let colors = LsColorsTheme::fallback();
+    let text = help_panel_text(ActivePane::Preview, &colors);
+    for header in [
+        "Preview Panel shortcuts",
+        "Global shortcuts",
+        "Shell Panel shortcuts",
+        "Navigation Panel shortcuts",
+    ] {
+        let span = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref() == header)
+            .expect("section header span");
+        assert!(span.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+    for header in ["<path typing>", "<history selection>"] {
+        let span = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref() == header)
+            .expect("input header span");
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+    }
 }
 
 #[test]
@@ -89,13 +266,21 @@ fn footer_shortcuts_line_flashes_orange_config_command_when_exit_blocked() {
     assert_eq!(config_label.style.fg, Some(Color::Indexed(208)));
     assert_eq!(config_key.style.fg, Some(Color::Indexed(208)));
     assert!(config_key.style.add_modifier.contains(Modifier::BOLD));
-    assert!(config_key.style.add_modifier.contains(Modifier::RAPID_BLINK));
+    assert!(
+        config_key
+            .style
+            .add_modifier
+            .contains(Modifier::RAPID_BLINK)
+    );
     assert_eq!(separator.style.fg, Some(Color::White));
 }
 
 #[test]
 fn footer_meta_uses_package_version() {
-    assert_eq!(footer_meta(), format!("Donate {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        footer_meta(),
+        format!("Donate {}", env!("CARGO_PKG_VERSION"))
+    );
 }
 
 #[test]
@@ -169,8 +354,10 @@ fn footer_shortcuts_comma_separators_are_white_in_both_modes() {
 }
 
 #[test]
-fn footer_shortcuts_pgup_pgdown_are_blue_bold() {
-    let key_style = Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD);
+fn footer_shortcuts_pgup_pgdown_match_active_panel_style() {
+    let key_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
     for mode in [ActivePane::Shell, ActivePane::Navigation] {
         let line = footer_shortcuts_line(mode, false, false, false, false);
         let mut saw_pgup = false;
@@ -235,24 +422,26 @@ fn footer_shortcuts_in_fullish_mode_use_darker_keys() {
 }
 
 #[test]
-fn nav_meta_compact_lines_split_size_and_time_to_bottom_line() {
+fn nav_meta_line_for_width_keeps_full_text_when_it_fits() {
     let meta = "drwxr-xr-x  17 637812460 637800513  4096 May 25 21:41";
-    let (top, bottom) = nav_meta_compact_lines(meta, 58);
-    assert_eq!(top.chars().count(), 58);
-    assert_eq!(bottom.chars().count(), 58);
-    assert!(top.starts_with("──drwxr-xr-x 17 637812460 637800513"));
-    assert!(top.contains("────────"));
-    assert!(bottom.starts_with("──"));
-    assert!(bottom.contains("────────"));
-    assert!(bottom.ends_with("4096 May 25 21:41──"));
+    let line = nav_meta_line_for_width(meta, 80);
+    assert_eq!(line, "drwxr-xr-x 17 637812460 637800513 4096 May 25 21:41");
 }
 
 #[test]
-fn nav_meta_compact_lines_handles_small_width_by_prioritizing_tail() {
+fn nav_meta_line_for_width_drops_owner_and_group_when_tight() {
+    let meta = "drwxr-xr-x  17 637812460 637800513  4096 May 25 21:41";
+    let line = nav_meta_line_for_width(meta, 40);
+    assert_eq!(line, "drwxr-xr-x 17 4096 May 25 21:41");
+}
+
+#[test]
+fn nav_meta_line_for_width_truncates_after_dropping_owner_and_group() {
     let meta = "drwxr-xr-x  17 user group  4096 May 25 21:41";
-    let (_top, bottom) = nav_meta_compact_lines(meta, 18);
-    assert_eq!(bottom.chars().count(), 18);
-    assert!(bottom.contains("May 25 21:41"));
+    let line = nav_meta_line_for_width(meta, 18);
+    assert_eq!(line.chars().count(), 18);
+    assert!(!line.contains("user"));
+    assert!(!line.contains("group"));
 }
 
 #[test]
@@ -282,13 +471,17 @@ fn preview_file_commands_panel_uses_escape_key_labels() {
     let rendered = text
         .lines
         .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref().to_string()))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     assert!(rendered.contains("Esc+r"));
     assert!(rendered.contains("Esc+w"));
+    assert!(rendered.contains("Esc+x"));
     assert!(rendered.contains("README.md"));
-    assert!(!rendered.contains("Esc+x"));
 
     fs::remove_dir_all(base).expect("cleanup temp");
 }
@@ -326,7 +519,7 @@ fn preview_file_commands_panel_centers_block_with_left_aligned_lines() {
                 .any(|span| span.content.as_ref().contains("Esc+"))
         })
         .collect::<Vec<_>>();
-    assert!(command_lines.len() >= 2);
+    assert!(command_lines.len() >= 3);
     let first_left_pad = command_lines[0].spans[0].content.len();
     let second_left_pad = command_lines[1].spans[0].content.len();
     assert_eq!(first_left_pad, second_left_pad);
@@ -361,14 +554,61 @@ fn preview_file_commands_panel_compact_mode_hides_command_tail() {
     let rendered = text
         .lines
         .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref().to_string()))
+        .flat_map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref().to_string())
+        })
         .collect::<Vec<String>>()
         .join("\n");
     assert!(rendered.contains("Esc+r"));
     assert!(rendered.contains("Esc+w"));
+    assert!(rendered.contains("Esc+x"));
     assert!(!rendered.contains("README.md"));
     assert!(!rendered.contains("bat"));
     assert!(!rendered.contains("nvim"));
+
+    fs::remove_dir_all(base).expect("cleanup temp");
+}
+
+#[test]
+fn preview_file_commands_panel_grays_out_unavailable_shortcuts() {
+    let config = ConfigState::default();
+    let identity = test_identity(1000, 1000, &[1000]);
+    let base = unique_temp_path("navix-preview-disabled-style");
+    fs::create_dir_all(&base).expect("create base");
+    let path = base.join("README.md");
+    fs::write(&path, b"# test").expect("write file");
+    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod file");
+    let entry = NavEntry {
+        name: "README.md".to_string(),
+        path: path.clone(),
+        is_dir: false,
+        is_symlink: false,
+        file_type_char: '-',
+        mode: 0o640,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        size: 0,
+        mtime: 0,
+    };
+
+    let text = preview_file_commands_panel_text(&entry, &config, "nvim", &identity, 60, 10, false);
+    let disabled_line = text
+        .lines
+        .iter()
+        .find(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref().contains("Esc+x"))
+        })
+        .expect("Esc+x line");
+    for span in &disabled_line.spans {
+        if !span.content.trim().is_empty() {
+            assert_eq!(span.style.fg, Some(Color::DarkGray));
+        }
+    }
 
     fs::remove_dir_all(base).expect("cleanup temp");
 }

@@ -1,98 +1,61 @@
 # navix
 
-Keyboard-first Rust TUI for filesystem navigation, preview command routing, and an embedded shell.
+Keyboard-first Rust TUI for navigating files, previewing commands, and keeping a live shell in the same workspace.
 
-## Platform support
+## Why Navix
 
-- Primary support target: Linux terminal environments.
-- Current implementation relies on Unix/Linux behavior in several runtime paths.
+- **Three-pane workflow**: `[1] Navigation`, `[2] Preview`, `[0] Shell`.
+- **Fast directory movement**: move with keys, filter live, and jump by path.
+- **Preview-first commands**: file-aware `read`, `write`, and `exec` shortcuts.
+- **Shell continuity**: embedded PTY keeps context while you browse.
+- **Keyboard-native UX**: no mouse dependency for core flows.
 
-## Quick start
+## Quick Start
 
-- Run from repo: `bin/navix`
-- Or run directly: `cargo run --manifest-path Cargo.toml`
+```bash
+# run from repository root
+./bin/navix
 
-## Layout
+# or via Cargo
+cargo run --manifest-path Cargo.toml
+```
 
-- `[1] Navigation` (left): current directory tree, selection, metadata footer.
-- `[2] Preview` (right): directory tree preview or file command hints.
-- `[0] Shell` (bottom): interactive shell running in a PTY.
+## Startup Examples
 
-## Core controls
+```bash
+# open with Preview focused
+./bin/navix --preview
 
-- Focus panes:
-  - `Esc+0` -> Shell
-  - `Esc+1` -> Navigation
-  - `Esc+2` -> Preview (may bounce to Navigation; see preview rules)
-- Toggle fullish mode:
-  - `Esc+f`
-- Open config editor:
-  - `Esc+c`
-- Exit app:
-  - `Ctrl+d`
+# start in a specific path
+./bin/navix --path ~/repos/navix/docs --navigation
 
-## Navigation controls
+# disable startup mouse capture
+./bin/navix --no-mouse-capture
+```
 
-- `Up/Down` -> move selection
-- `PageUp/PageDown` -> move selection by viewport
-- `Enter` on directory -> `cd` into directory
-- `Space` on directory -> toggle directory preview on/off
-- `Ctrl+Up/Ctrl+Down` -> scroll navigation viewport
+## Core Keys
 
-## Shell controls
+- `Esc+0`, `Esc+1`, `Esc+2`: focus Shell / Navigation / Preview
+- `Esc+c`: open config editor
+- `Esc+f`: toggle fullish mode
+- `Ctrl+d`: exit
 
-- `Up/Down` are sent to the shell (history behavior stays shell-native)
-- `PageUp/PageDown` scroll shell output
-- `Esc+Up/Esc+Down` scroll shell output
-- Interactive child TUIs can run in the shell pane
+For full behavior and exact panel semantics, see `docs/CURRENT_BEHAVIOR.md`.
 
-## Preview command shortcuts (file selection)
-
-When a file is selected, Navix resolves extension rules and permission bits to show command hints in preview.
-
-- `Esc+r` -> run read command in preview overlay
-- `Esc+w` -> run write command in preview overlay
-- `Esc+x` -> prefill shell command (clears current shell line first)
-
-If an extension has no explicit rule, Navix uses fallback commands:
-
-- read: `bat {file}`
-- write: `$EDITOR {file}`
-- exec: disabled (`--`)
-
-## Mouse support
-
-- Left click a panel to focus it (`Navigation`, `Preview`, or `Shell`).
-- Preview clicks still follow preview focus bounce rules.
-- Mouse is currently used for panel focus selection, not for forwarding rich mouse events into child TUIs.
-
-## Preview focus bounce rules
-
-Preview is intentionally non-sticky in passive states.
-
-- If selected entry is a directory and preview mode is directory tree, focus target becomes `Navigation`.
-- If selected entry is a file and preview mode is file command list, focus target becomes `Navigation`.
-
-This applies to both `Esc+2` and mouse-click focus on preview.
-
-## Config file
-
-- Path:
-  - `$XDG_CONFIG_HOME/navix/config.toml`, or
-  - `~/.config/navix/config.toml`
-- Main data: `extension_rules`
-- Open in-app editor with `Esc+c`
-
-See `docs/CURRENT_BEHAVIOR.md` for details and config editing controls.
-
-## Project docs
+## Documentation
 
 - Behavior reference: `docs/CURRENT_BEHAVIOR.md`
+- Developer/runtime guide: `DEVELOPING.md`
 - Architecture notes: `docs/ARCHITECTURE.md`
 - Engineering conventions: `docs/PROJECT_CONVENTIONS.md`
 - Contribution guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`
 - Release checklist: `docs/OPEN_SOURCE_RELEASE.md`
+
+## Platform
+
+- Primary support target: Linux terminal environments.
+- Current implementation relies on Unix/Linux behavior in several runtime paths.
 
 ## License
 

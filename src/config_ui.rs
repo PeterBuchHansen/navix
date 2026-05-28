@@ -106,7 +106,7 @@ pub(crate) fn default_extension_rule(extension: &str) -> ExtensionCommandRule {
         extension: normalize_extension(extension),
         read_cmd: "bat {file}".to_string(),
         write_cmd: "$EDITOR {file}".to_string(),
-        exec_cmd: "--".to_string(),
+        exec_cmd: "None".to_string(),
     }
 }
 
@@ -143,7 +143,12 @@ pub(crate) fn next_char_boundary(text: &str, cursor: usize) -> usize {
     safe_cursor.saturating_add(step).min(text.len())
 }
 
-fn cursor_spans(text: &str, cursor: usize, text_style: Style, cursor_style: Style) -> Vec<Span<'static>> {
+fn cursor_spans(
+    text: &str,
+    cursor: usize,
+    text_style: Style,
+    cursor_style: Style,
+) -> Vec<Span<'static>> {
     let safe_cursor = clamp_char_boundary(text, cursor);
     let mut spans = Vec::new();
     let (left, right) = text.split_at(safe_cursor);
@@ -164,7 +169,10 @@ fn cursor_spans(text: &str, cursor: usize, text_style: Style, cursor_style: Styl
     spans
 }
 
-pub(crate) fn config_field_value<'a>(rule: &'a ExtensionCommandRule, field: ConfigField) -> &'a str {
+pub(crate) fn config_field_value<'a>(
+    rule: &'a ExtensionCommandRule,
+    field: ConfigField,
+) -> &'a str {
     match field {
         ConfigField::Extension => &rule.extension,
         ConfigField::Read => &rule.read_cmd,
@@ -284,9 +292,13 @@ pub(crate) fn config_panel_text(
         Style::default().fg(Color::White)
     };
     let hint_key_style = if fullish_shell_theme {
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
     };
     let command_separator_style = if fullish_shell_theme {
         Style::default().fg(Color::DarkGray)
@@ -294,9 +306,13 @@ pub(crate) fn config_panel_text(
         Style::default().fg(Color::White)
     };
     let field_style = if fullish_shell_theme {
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::LightBlue)
+            .add_modifier(Modifier::BOLD)
     };
     let selected_style = if fullish_shell_theme {
         Style::default().fg(Color::Black).bg(Color::DarkGray)
@@ -304,9 +320,13 @@ pub(crate) fn config_panel_text(
         Style::default().fg(Color::Black).bg(Color::LightBlue)
     };
     let edit_text_style = if fullish_shell_theme {
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     };
     let edit_cursor_style = if fullish_shell_theme {
         Style::default().fg(Color::Black).bg(Color::DarkGray)
@@ -314,7 +334,9 @@ pub(crate) fn config_panel_text(
         Style::default().fg(Color::Black).bg(Color::White)
     };
     let diff_removed_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    let diff_added_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let diff_added_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
 
     let mut top_spans = Vec::new();
     top_spans.push(Span::styled("Rule: ", label_style));
@@ -375,9 +397,11 @@ pub(crate) fn config_panel_text(
             ConfigRuleDiffKind::Removed => Some(diff_removed_style),
             ConfigRuleDiffKind::Modified => None,
         };
-        let extension_changed = baseline_rule.is_some_and(|baseline| baseline.extension != rule.extension);
+        let extension_changed =
+            baseline_rule.is_some_and(|baseline| baseline.extension != rule.extension);
         let read_changed = baseline_rule.is_some_and(|baseline| baseline.read_cmd != rule.read_cmd);
-        let write_changed = baseline_rule.is_some_and(|baseline| baseline.write_cmd != rule.write_cmd);
+        let write_changed =
+            baseline_rule.is_some_and(|baseline| baseline.write_cmd != rule.write_cmd);
         let exec_changed = baseline_rule.is_some_and(|baseline| baseline.exec_cmd != rule.exec_cmd);
         let extension_style = if selected_rule && editor.selected_field == ConfigField::Extension {
             selected_style
@@ -444,7 +468,10 @@ pub(crate) fn config_panel_text(
                 edit_cursor_style,
             ));
         } else {
-            extension_line.push(Span::styled(format!(".{}", rule.extension), extension_style));
+            extension_line.push(Span::styled(
+                format!(".{}", rule.extension),
+                extension_style,
+            ));
         }
         extension_line.push(Span::styled(
             format!("{extension_padding}: extension:"),
@@ -472,7 +499,11 @@ pub(crate) fn config_panel_text(
         }
         lines.push(Line::from(extension_line));
 
-        if selected_rule && editable_rule && editor.selected_field == ConfigField::Read && editor.editing {
+        if selected_rule
+            && editable_rule
+            && editor.selected_field == ConfigField::Read
+            && editor.editing
+        {
             let mut line = vec![Span::styled("    read : ", label_style)];
             line.extend(cursor_spans(
                 &editor.input_buffer,
@@ -490,7 +521,10 @@ pub(crate) fn config_panel_text(
                         diff_removed_style,
                     ));
                     line.push(Span::styled(" ".to_string(), label_style));
-                    line.push(Span::styled(format!("+ {}", rule.read_cmd), diff_added_style));
+                    line.push(Span::styled(
+                        format!("+ {}", rule.read_cmd),
+                        diff_added_style,
+                    ));
                 } else {
                     line.push(Span::styled(rule.read_cmd.clone(), read_style));
                 }
@@ -500,7 +534,11 @@ pub(crate) fn config_panel_text(
             lines.push(Line::from(line));
         }
 
-        if selected_rule && editable_rule && editor.selected_field == ConfigField::Write && editor.editing {
+        if selected_rule
+            && editable_rule
+            && editor.selected_field == ConfigField::Write
+            && editor.editing
+        {
             let mut line = vec![Span::styled("    write: ", label_style)];
             line.extend(cursor_spans(
                 &editor.input_buffer,
@@ -531,7 +569,11 @@ pub(crate) fn config_panel_text(
             lines.push(Line::from(line));
         }
 
-        if selected_rule && editable_rule && editor.selected_field == ConfigField::Exec && editor.editing {
+        if selected_rule
+            && editable_rule
+            && editor.selected_field == ConfigField::Exec
+            && editor.editing
+        {
             let mut line = vec![Span::styled("    exec : ", label_style)];
             line.extend(cursor_spans(
                 &editor.input_buffer,
@@ -549,7 +591,10 @@ pub(crate) fn config_panel_text(
                         diff_removed_style,
                     ));
                     line.push(Span::styled(" ".to_string(), label_style));
-                    line.push(Span::styled(format!("+ {}", rule.exec_cmd), diff_added_style));
+                    line.push(Span::styled(
+                        format!("+ {}", rule.exec_cmd),
+                        diff_added_style,
+                    ));
                 } else {
                     line.push(Span::styled(rule.exec_cmd.clone(), exec_style));
                 }
@@ -563,9 +608,13 @@ pub(crate) fn config_panel_text(
 
     if editor.dirty {
         let unsaved_style = if fullish_shell_theme {
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         };
         let mut unsaved_spans = vec![
             Span::styled("Unsaved changes*", unsaved_style),

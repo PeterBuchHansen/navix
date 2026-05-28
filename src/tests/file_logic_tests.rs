@@ -101,8 +101,11 @@ fn preview_command_template_resolves_editor_and_filename() {
 
 #[test]
 fn preview_command_template_supports_raw_placeholder() {
-    let resolved =
-        resolve_preview_command_template("tool --raw {file_raw} --safe {file}", "my file.txt", "nvim");
+    let resolved = resolve_preview_command_template(
+        "tool --raw {file_raw} --safe {file}",
+        "my file.txt",
+        "nvim",
+    );
     assert_eq!(resolved, "tool --raw my file.txt --safe 'my file.txt'");
 }
 
@@ -280,6 +283,72 @@ fn navigation_file_command_action_prefills_exec_in_shell() {
             "bash 'script.sh'".to_string()
         ))
     );
+
+    fs::remove_dir_all(base).expect("cleanup temp");
+}
+
+#[test]
+fn navigation_file_command_action_follows_effective_read_access() {
+    let config = ConfigState::default();
+    let identity = test_identity(1000, 1000, &[1000]);
+    let base = unique_temp_path("navix-nav-read-no-perm");
+    fs::create_dir_all(&base).expect("create base");
+    let path = base.join("README.md");
+    fs::write(&path, b"# test").expect("write file");
+    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).expect("chmod file");
+    let entry = NavEntry {
+        name: "README.md".to_string(),
+        path: path.clone(),
+        is_dir: false,
+        is_symlink: false,
+        file_type_char: '-',
+        mode: 0o200,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        size: 0,
+        mtime: 0,
+    };
+
+    let access = kernel_effective_access_for_path(&path).expect("kernel access");
+    let action = navigation_file_command_action(Some(&entry), 'r', &config, "nvim", &identity);
+    if access.read {
+        assert!(matches!(
+            action,
+            Some(NavigationFileCommandAction::RunReadInPreview(_))
+        ));
+    } else {
+        assert_eq!(action, None);
+    }
+
+    fs::remove_dir_all(base).expect("cleanup temp");
+}
+
+#[test]
+fn navigation_file_command_action_disables_exec_without_exec_permission() {
+    let config = ConfigState::default();
+    let identity = test_identity(1000, 1000, &[1000]);
+    let base = unique_temp_path("navix-nav-exec-no-perm");
+    fs::create_dir_all(&base).expect("create base");
+    let path = base.join("script.sh");
+    fs::write(&path, b"#!/bin/bash\necho hi\n").expect("write file");
+    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod file");
+    let entry = NavEntry {
+        name: "script.sh".to_string(),
+        path: path.clone(),
+        is_dir: false,
+        is_symlink: false,
+        file_type_char: '-',
+        mode: 0o640,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        size: 0,
+        mtime: 0,
+    };
+
+    let action = navigation_file_command_action(Some(&entry), 'x', &config, "nvim", &identity);
+    assert_eq!(action, None);
 
     fs::remove_dir_all(base).expect("cleanup temp");
 }

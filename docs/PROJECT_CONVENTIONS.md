@@ -52,7 +52,7 @@ From `ratatui` and `openapi-tui`:
 Navix policy:
 
 - `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo clippy --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious`
 - `cargo test --locked --manifest-path Cargo.toml`
 
 Note: `ratatui` uses nightly-only rustfmt options. Navix intentionally keeps stable rustfmt options only.

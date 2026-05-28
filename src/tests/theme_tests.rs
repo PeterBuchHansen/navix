@@ -1,16 +1,18 @@
 use super::*;
 
 #[test]
-fn nav_row_selected_style_highlights_with_light_blue_background() {
+fn nav_row_selected_style_highlights_with_yellow_background() {
     let base = Style::default().fg(Color::Blue);
     let selected = nav_row_selected_style(base, true);
     assert_eq!(selected.fg, Some(Color::Black));
-    assert_eq!(selected.bg, Some(Color::LightBlue));
+    assert_eq!(selected.bg, Some(Color::Yellow));
 }
 
 #[test]
 fn nav_style_for_theme_dims_foreground_in_fullish_mode() {
-    let base = Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD);
+    let base = Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::BOLD);
     let dimmed = nav_style_for_theme(base, true);
     assert_eq!(dimmed.fg, Some(Color::DarkGray));
     assert!(dimmed.add_modifier.contains(Modifier::BOLD));

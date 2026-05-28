@@ -78,7 +78,8 @@ fn shell_output_burst_update_arms_on_output_and_refreshes_when_quiet() {
     assert!(active_after_output);
     assert!(!refresh_after_output);
 
-    let (active_after_quiet, refresh_after_quiet) = shell_output_burst_update(active_after_output, 0, false);
+    let (active_after_quiet, refresh_after_quiet) =
+        shell_output_burst_update(active_after_output, 0, false);
     assert!(!active_after_quiet);
     assert!(refresh_after_quiet);
 }
@@ -282,10 +283,8 @@ fn is_fullish_layout_state_detects_shell_nav_and_preview_modes() {
 
 #[test]
 fn preview_overlay_presentation_promotes_to_interactive_on_alt_screen() {
-    let state = next_preview_overlay_presentation(
-        Some(PreviewOverlayPresentation::StaticFullscreen),
-        true,
-    );
+    let state =
+        next_preview_overlay_presentation(Some(PreviewOverlayPresentation::StaticFullscreen), true);
     assert_eq!(
         state,
         Some(PreviewOverlayPresentation::InteractiveFullscreenDim)

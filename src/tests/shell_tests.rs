@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 #[test]
 fn prompt_segments_survive_carriage_return_redraws() {
@@ -55,7 +56,10 @@ fn parse_scrollback_limit_rejects_invalid_values() {
 #[test]
 fn resolve_scrollback_limit_uses_default_when_missing() {
     let candidates = [None, None];
-    assert_eq!(resolve_scrollback_limit(&candidates, 500_000, 500_000), 500_000);
+    assert_eq!(
+        resolve_scrollback_limit(&candidates, 500_000, 500_000),
+        500_000
+    );
 }
 
 #[test]
@@ -114,4 +118,18 @@ fn default_history_file_for_shell_uses_standard_paths() {
                 || path == format!("{home}/.zhistory")
                 || path.ends_with("/zsh/history")
     ));
+}
+
+#[test]
+fn cd_to_bytes_clears_prompt_before_cd_command() {
+    let bytes = cd_to_bytes(Path::new("/tmp/demo"), false);
+    assert!(bytes.starts_with(&[0x01, 0x0b]));
+    let rendered = String::from_utf8(bytes[2..].to_vec()).expect("utf8");
+    assert_eq!(rendered, "cd -- '/tmp/demo'\r");
+}
+
+#[test]
+fn cd_to_bytes_restores_pending_input_when_requested() {
+    let bytes = cd_to_bytes(Path::new("/tmp/demo"), true);
+    assert_eq!(bytes.last().copied(), Some(0x19));
 }
