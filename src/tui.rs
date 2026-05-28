@@ -1200,15 +1200,46 @@ fn history_wheel_line(
     let entry = if index == 0 {
         "...".to_string()
     } else {
-        history
+        let raw = history
             .get(index.saturating_sub(1))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        preview_history_display_path(&raw)
     };
     Line::from(vec![
         Span::styled(" ".repeat(input_alignment_padding), style),
         Span::styled(entry, style),
     ])
+}
+
+fn preview_history_display_path(entry: &str) -> String {
+    let trimmed = entry.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed == "~" || trimmed.starts_with("~/") {
+        return trimmed.to_string();
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return trimmed.to_string();
+    };
+    let home_path = Path::new(&home);
+    if home_path.as_os_str().is_empty() {
+        return trimmed.to_string();
+    }
+    let entry_path = Path::new(trimmed);
+    if entry_path == home_path {
+        return "~".to_string();
+    }
+    if let Ok(relative) = entry_path.strip_prefix(home_path) {
+        if relative.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", relative.display())
+        }
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn completion_display_label(query: &str, candidate: &str) -> String {

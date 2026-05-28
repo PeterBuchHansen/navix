@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="PeterBuchHansen/navix"
+TAG=""
+FORCE=0
+BIN_DIR="/usr/local/bin"
+ARCHIVE_PATH=""
+
+usage() {
+  cat <<'EOF'
+Usage: bootstrap/install [--force] [--tag <vX.Y.Z>] [--repo <owner/name>] [--bin-dir <dir>] [--archive <path>]
+
+Options:
+  --force          Reinstall even if navix already exists.
+  --tag <tag>      Install a specific release tag (default: latest release).
+  --repo <repo>    GitHub repo in owner/name form (default: PeterBuchHansen/navix).
+  --bin-dir <dir>  Install directory (default: /usr/local/bin).
+  --archive <path> Install from a local archive instead of downloading.
+  -h, --help       Show help.
+EOF
+}
+
+error() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=1
+      shift
+      ;;
+    --tag)
+      [[ $# -ge 2 ]] || error "--tag requires a value"
+      TAG="$2"
+      shift 2
+      ;;
+    --repo)
+      [[ $# -ge 2 ]] || error "--repo requires a value"
+      REPO="$2"
+      shift 2
+      ;;
+    --bin-dir)
+      [[ $# -ge 2 ]] || error "--bin-dir requires a value"
+      BIN_DIR="$2"
+      shift 2
+      ;;
+    --archive)
+      [[ $# -ge 2 ]] || error "--archive requires a value"
+      ARCHIVE_PATH="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      error "Unknown option: $1"
+      ;;
+  esac
+done
+
+DEST_BIN="${BIN_DIR}/navix"
+
+if [[ -x "${DEST_BIN}" && "${FORCE}" -eq 0 ]]; then
+  echo "navix already installed at ${DEST_BIN}. Use --force to reinstall."
+  exit 0
+fi
+
+tmpdir="$(mktemp -d)"
+cleanup() {
+  rm -rf "${tmpdir}"
+}
+trap cleanup EXIT
+
+archive="${ARCHIVE_PATH:-${tmpdir}/navix.tar.gz}"
+
+detect_target_triple() {
+  local os arch
+  os="$(uname -s 2>/dev/null || true)"
+  arch="$(uname -m 2>/dev/null || true)"
+
+  case "${os}" in
+    Linux) ;;
+    Darwin) ;;
+    *)
+      error "Unsupported operating system: ${os:-unknown}"
+      ;;
+  esac
+
+  case "${arch}" in
+    x86_64|amd64)
+      arch="x86_64"
+      ;;
+    arm64|aarch64)
+      arch="aarch64"
+      ;;
+    *)
+      error "Unsupported architecture: ${arch:-unknown}"
+      ;;
+  esac
+
+  if [[ "${os}" == "Linux" ]]; then
+    if [[ "${arch}" != "x86_64" ]]; then
+      error "Unsupported Linux architecture: ${arch}"
+    fi
+    echo "x86_64-unknown-linux-gnu"
+    return
+  fi
+
+  if [[ "${arch}" == "x86_64" ]]; then
+    echo "x86_64-apple-darwin"
+  else
+    echo "aarch64-apple-darwin"
+  fi
+}
+
+resolve_latest_tag() {
+  local api
+  api="https://api.github.com/repos/${REPO}/releases/latest"
+  curl -fsSL "${api}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])'
+}
+
+if [[ -z "${ARCHIVE_PATH}" ]]; then
+  [[ -n "${TAG}" ]] || TAG="$(resolve_latest_tag)"
+  [[ -n "${TAG}" ]] || error "Could not resolve release tag"
+  target="$(detect_target_triple)"
+  asset="navix-${TAG}-${target}.tar.gz"
+  url="https://github.com/${REPO}/releases/download/${TAG}/${asset}"
+
+  echo "Downloading ${url}"
+  curl -fL "${url}" -o "${archive}" || error "Failed to download ${url}"
+else
+  [[ -f "${archive}" ]] || error "Archive not found: ${archive}"
+fi
+
+binary_path="$(tar -tzf "${archive}" | awk -F/ '$NF=="navix"{print; exit}')"
+if [[ -z "${binary_path}" ]]; then
+  error "navix binary not found in archive: ${archive}"
+fi
+
+extract_dir="${tmpdir}/extract"
+mkdir -p "${extract_dir}"
+tar -xzf "${archive}" -C "${extract_dir}" "${binary_path}" || error "Failed to extract ${binary_path} from archive"
+
+source_bin="${extract_dir}/${binary_path}"
+[[ -f "${source_bin}" ]] || error "Extracted navix binary missing at expected path: ${binary_path}"
+
+mkdir -p "${BIN_DIR}" 2>/dev/null || true
+if [[ -w "${BIN_DIR}" ]]; then
+  install -m 0755 "${source_bin}" "${DEST_BIN}"
+else
+  command -v sudo >/dev/null 2>&1 || error "sudo is required to install to ${BIN_DIR}"
+  sudo install -m 0755 "${source_bin}" "${DEST_BIN}"
+fi
+
+echo "Installed navix to ${DEST_BIN}"

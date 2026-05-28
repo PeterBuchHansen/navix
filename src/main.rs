@@ -128,7 +128,7 @@ pub(crate) use shell::{ShellMetrics, ShellPane, shell_single_quote};
 #[cfg(test)]
 pub(crate) use shell::{
     bash_history_sync_prompt_command, cd_to_bytes, default_history_file_for_shell,
-    shell_program_name,
+    resolve_launch_shell_path_with, shell_program_name,
 };
 #[cfg(test)]
 pub(crate) use shell::{parse_scrollback_limit, resolve_scrollback_limit};
@@ -169,8 +169,19 @@ struct RuntimeOptions {
     startup_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimeCommand {
+    Run(RuntimeOptions),
+    PrintHelp,
+    PrintVersion,
+}
+
 fn runtime_usage() -> &'static str {
     "Usage: navix [--no-mouse-capture] [--path <PATH>] [--navigation | --preview | --shell]"
+}
+
+fn runtime_version() -> String {
+    format!("navix {}", env!("CARGO_PKG_VERSION"))
 }
 
 fn set_startup_focus_option(
@@ -260,8 +271,30 @@ where
     Ok(options)
 }
 
-fn parse_runtime_options() -> Result<RuntimeOptions, String> {
-    parse_runtime_options_from_args(std::env::args().skip(1))
+fn parse_runtime_command_from_args<I, S>(args: I) -> Result<RuntimeCommand, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let args_vec: Vec<String> = args.into_iter().map(Into::into).collect();
+    if args_vec
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--version" | "-V"))
+    {
+        return Ok(RuntimeCommand::PrintVersion);
+    }
+    if args_vec
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        return Ok(RuntimeCommand::PrintHelp);
+    }
+    let options = parse_runtime_options_from_args(args_vec)?;
+    Ok(RuntimeCommand::Run(options))
+}
+
+fn parse_runtime_command() -> Result<RuntimeCommand, String> {
+    parse_runtime_command_from_args(std::env::args().skip(1))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,10 +570,21 @@ fn highlight_selection(
 }
 
 fn main() {
-    let options = match parse_runtime_options() {
-        Ok(options) => options,
+    let command = match parse_runtime_command() {
+        Ok(command) => command,
         Err(message) => {
             eprintln!("{message}");
+            return;
+        },
+    };
+    let options = match command {
+        RuntimeCommand::Run(options) => options,
+        RuntimeCommand::PrintHelp => {
+            println!("{}", runtime_usage());
+            return;
+        },
+        RuntimeCommand::PrintVersion => {
+            println!("{}", runtime_version());
             return;
         },
     };
