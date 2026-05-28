@@ -234,7 +234,7 @@ pub(crate) fn navigation_panel_text(
 ) -> Text<'static> {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!("{}", cwd.display()),
+        navigation_cwd_display_path(cwd),
         nav_style_for_theme(
             Style::default()
                 .fg(Color::Cyan)
@@ -314,6 +314,27 @@ pub(crate) fn navigation_panel_text(
     }
 
     Text::from(lines)
+}
+
+fn navigation_cwd_display_path(cwd: &Path) -> String {
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if let Some(home) = home.as_deref() {
+        if home == Path::new("/") {
+            return cwd.display().to_string();
+        }
+        if cwd == home {
+            return "~".to_string();
+        }
+        if let Ok(relative) = cwd.strip_prefix(home) {
+            if relative.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", relative.display());
+        }
+    }
+    cwd.display().to_string()
 }
 
 #[cfg(test)]

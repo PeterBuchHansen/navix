@@ -133,3 +133,41 @@ fn cd_to_bytes_restores_pending_input_when_requested() {
     let bytes = cd_to_bytes(Path::new("/tmp/demo"), true);
     assert_eq!(bytes.last().copied(), Some(0x19));
 }
+
+#[test]
+fn resolve_launch_shell_prefers_explicit_navix_launch_shell() {
+    let resolved = resolve_launch_shell_path_with(
+        Some("/opt/custom/zsh"),
+        Some("zsh"),
+        Some("/bin/bash"),
+        |_| Some("/usr/bin/zsh".to_string()),
+    );
+    assert_eq!(resolved, "/opt/custom/zsh");
+}
+
+#[test]
+fn resolve_launch_shell_prefers_parent_shell_over_shell_env_when_detected() {
+    let resolved =
+        resolve_launch_shell_path_with(None, Some("zsh"), Some("/bin/bash"), |command| {
+            if command == "zsh" {
+                Some("/usr/bin/zsh".to_string())
+            } else {
+                None
+            }
+        });
+    assert_eq!(resolved, "/usr/bin/zsh");
+}
+
+#[test]
+fn resolve_launch_shell_ignores_non_shell_parent_and_uses_shell_env() {
+    let resolved = resolve_launch_shell_path_with(None, Some("tmux"), Some("/bin/bash"), |_| {
+        Some("/usr/bin/tmux".to_string())
+    });
+    assert_eq!(resolved, "/bin/bash");
+}
+
+#[test]
+fn resolve_launch_shell_falls_back_to_bin_sh_when_no_candidates_exist() {
+    let resolved = resolve_launch_shell_path_with(None, None, None, |_| None);
+    assert_eq!(resolved, "/bin/sh");
+}

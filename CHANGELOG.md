@@ -8,6 +8,20 @@ All notable changes to this project are documented here.
 
 - No changes yet.
 
+## [0.3.1] - 2026-05-28
+
+### Added
+
+- Added `navix --version` (and `-V`) so release binaries can report their exact package version without launching the TUI.
+
+### Fixed
+
+- Shell startup now prefers the active parent shell command (when it is a supported shell like `zsh`/`bash`) before falling back to `SHELL`, preventing stale login `SHELL` values from launching the wrong shell inside Navix.
+
+### Tests
+
+- Added targeted shell-resolution regression tests covering explicit override priority, parent-shell preference, non-shell parent fallback, and `/bin/sh` fallback behavior.
+
 ## [0.3.0] - 2026-05-28
 
 ### Added

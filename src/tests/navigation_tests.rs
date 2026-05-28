@@ -134,3 +134,32 @@ fn navigation_tree_lines_show_only_level_one_entries() {
 
     fs::remove_dir_all(base).expect("cleanup temp");
 }
+
+fn line_plain_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+#[test]
+fn navigation_panel_text_shows_home_relative_cwd() {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    if home == PathBuf::from("/") {
+        return;
+    }
+    let cwd = home.join("repos/navix");
+    let text = navigation_panel_text(&cwd, &[], 0, 0, 0, &LsColorsTheme::fallback(), false, None);
+    let heading = line_plain_text(&text.lines[0]);
+    assert_eq!(heading, "~/repos/navix");
+}
+
+#[test]
+fn navigation_panel_text_keeps_absolute_path_outside_home() {
+    let cwd = PathBuf::from("/var/tmp/navix");
+    let text = navigation_panel_text(&cwd, &[], 0, 0, 0, &LsColorsTheme::fallback(), false, None);
+    let heading = line_plain_text(&text.lines[0]);
+    assert_eq!(heading, "/var/tmp/navix");
+}

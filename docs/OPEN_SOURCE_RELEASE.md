@@ -15,6 +15,7 @@
 
 - Keep maintainer contact current in `SECURITY.md` and `CODE_OF_CONDUCT.md`.
 - Keep `repository` metadata aligned if repo URL changes.
+- Follow the maintained release flow in `docs/RELEASE_PROCESS.md` (`.github/workflows/release.yml`).
 
 ## Quality gate
 

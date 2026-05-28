@@ -19,6 +19,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -52,11 +53,15 @@ pub(crate) struct ShellMetrics {
 impl ShellPane {
     pub(crate) fn spawn() -> io::Result<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        let shell_path = std::env::var("NAVIX_LAUNCH_SHELL")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .or_else(|| std::env::var("SHELL").ok().filter(|v| !v.is_empty()))
-            .unwrap_or_else(|| "/bin/sh".to_string());
+        let navix_launch_shell = std::env::var("NAVIX_LAUNCH_SHELL").ok();
+        let parent_process = parent_process_command_name();
+        let shell_env = std::env::var("SHELL").ok();
+        let shell_path = resolve_launch_shell_path_with(
+            navix_launch_shell.as_deref(),
+            parent_process.as_deref(),
+            shell_env.as_deref(),
+            resolve_command_from_path,
+        );
         let shell_program = shell_program_name(&shell_path);
         let mut command = CommandBuilder::new(shell_path.clone());
         if shell_program == "zsh" {
@@ -341,6 +346,90 @@ impl ShellPane {
         }
         self.last_known_cwd.clone()
     }
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+}
+
+fn is_supported_shell_program(shell_program: &str) -> bool {
+    matches!(
+        shell_program,
+        "bash" | "zsh" | "fish" | "sh" | "dash" | "ksh" | "mksh" | "ash" | "csh" | "tcsh"
+    )
+}
+
+fn parent_process_command_name() -> Option<String> {
+    let ppid = unsafe { libc::getppid() };
+    if ppid <= 1 {
+        return None;
+    }
+    let output = Command::new("ps")
+        .arg("-p")
+        .arg(ppid.to_string())
+        .arg("-o")
+        .arg("comm=")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn resolve_command_from_path(command: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    if command.contains('/') {
+        let path = Path::new(command);
+        if path.exists() {
+            return Some(path.to_string_lossy().into_owned());
+        }
+        return None;
+    }
+    let path_env = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path_env) {
+        let candidate = directory.join(command);
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+pub(crate) fn resolve_launch_shell_path_with<F>(
+    navix_launch_shell: Option<&str>,
+    parent_comm: Option<&str>,
+    shell_env: Option<&str>,
+    resolve_command: F,
+) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(explicit_shell) = non_empty_trimmed(navix_launch_shell) {
+        return explicit_shell.to_string();
+    }
+    if let Some(parent_command) = non_empty_trimmed(parent_comm) {
+        let parent_program = shell_program_name(parent_command);
+        if is_supported_shell_program(&parent_program)
+            && let Some(resolved_parent) = resolve_command(parent_command)
+        {
+            return resolved_parent;
+        }
+    }
+    if let Some(shell_from_env) = non_empty_trimmed(shell_env) {
+        return shell_from_env.to_string();
+    }
+    "/bin/sh".to_string()
 }
 
 impl Drop for ShellPane {

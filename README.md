@@ -33,6 +33,13 @@ cargo run --manifest-path Cargo.toml
 ./bin/navix --no-mouse-capture
 ```
 
+## Showcase
+
+![Navix demo](docs/screenshots/navix-demo.gif)
+![Navix navigation startup](docs/screenshots/navix-navigation.png)
+![Navix preview startup](docs/screenshots/navix-preview.png)
+![Navix shell startup](docs/screenshots/navix-shell.png)
+
 ## Core Keys
 
 - `Esc+0`, `Esc+1`, `Esc+2`: focus Shell / Navigation / Preview
@@ -50,12 +57,16 @@ For full behavior and exact panel semantics, see `docs/CURRENT_BEHAVIOR.md`.
 - Engineering conventions: `docs/PROJECT_CONVENTIONS.md`
 - Contribution guide: `CONTRIBUTING.md`
 - Security policy: `SECURITY.md`
+- Release process: `docs/RELEASE_PROCESS.md`
 - Release checklist: `docs/OPEN_SOURCE_RELEASE.md`
 
 ## Platform
 
 - Primary support target: Linux terminal environments.
-- Current implementation relies on Unix/Linux behavior in several runtime paths.
+- macOS is supported via release binaries for Intel and Apple Silicon.
+- Native Windows is not supported.
+- Windows users can run Navix through WSL using the Linux release binary (`x86_64-unknown-linux-gnu`).
+- Current runtime behavior relies on Unix/Linux shell and path semantics.
 
 ## License
 

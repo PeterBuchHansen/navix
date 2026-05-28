@@ -156,6 +156,52 @@ fn help_panel_text_shows_preview_path_input_context() {
 }
 
 #[test]
+fn preview_jump_panel_history_displays_home_relative_paths() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    if home.is_empty() {
+        return;
+    }
+    let history_entry = if home == "/" {
+        "/repos/navix/docs".to_string()
+    } else {
+        format!("{home}/repos/navix/docs")
+    };
+    let history = vec![history_entry];
+    let colors = LsColorsTheme::fallback();
+    let text = preview_jump_panel_text(
+        "",
+        "",
+        false,
+        &history,
+        None,
+        &[],
+        None,
+        None,
+        &colors,
+        100,
+        12,
+        false,
+    );
+    let rendered_lines = text
+        .lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>();
+    assert!(
+        rendered_lines
+            .iter()
+            .any(|line| line.contains("~/repos/navix/docs"))
+    );
+}
+
+#[test]
 fn help_panel_text_places_active_panel_section_first_and_keeps_white_header() {
     let colors = LsColorsTheme::fallback();
     let text = help_panel_text(ActivePane::Preview, &colors);

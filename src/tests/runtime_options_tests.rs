@@ -59,6 +59,26 @@ fn parse_runtime_options_removes_dot_alias_for_mouse_capture() {
 }
 
 #[test]
+fn parse_runtime_command_accepts_version_flags() {
+    assert_eq!(
+        parse_runtime_command_from_args(vec!["--version"]).expect("version"),
+        RuntimeCommand::PrintVersion
+    );
+    assert_eq!(
+        parse_runtime_command_from_args(vec!["-V"]).expect("short version"),
+        RuntimeCommand::PrintVersion
+    );
+}
+
+#[test]
+fn parse_runtime_command_prioritizes_version_over_other_flags() {
+    assert_eq!(
+        parse_runtime_command_from_args(vec!["--version", "--shell"]).expect("version precedence"),
+        RuntimeCommand::PrintVersion
+    );
+}
+
+#[test]
 fn resolve_startup_path_option_uses_directory_as_startup_cwd() {
     let dir = unique_temp_path("runtime-options-startup-dir");
     fs::create_dir_all(&dir).expect("create dir");
