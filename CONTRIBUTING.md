@@ -13,6 +13,19 @@
 - Lint check: `cargo clippy --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious`
 - Test suite: `cargo test --locked --manifest-path Cargo.toml`
 
+## Branch naming rule
+
+- For work targeting `main`, create issue-linked branches using:
+  - `main_<issue-number>_<first-name>_<issue-description-short>`
+- Define a parent-branch short prefix as:
+  - `main_<issue-number>_<first-name>`
+- For sub-branches off that parent prefix, use:
+  - `main_<issue-number>_<first-name>_<sub-n>_<first-name>_<sub-task-description>`
+- Keep description segments lowercase and concise, using underscores instead of spaces.
+- Examples:
+  - Parent branch: `main_1_peter_post_release_alignment`
+  - Sub-branch: `main_1_peter_2_peter_fix_runtime_tests`
+
 ## PR scope rules
 
 - Keep changes narrow and behavior-focused.
@@ -54,3 +67,13 @@ When reporting bugs, include:
 - exact repro steps
 - expected vs actual behavior
 - keybindings used
+- navix version (`./navix --version`)
+
+If the bug is not easy to reproduce, logs are required. If possible, always include logs.
+
+Log collection:
+
+- Release artifact users: run `./navix --debug-log=all`, reproduce the issue, then attach:
+  - `/tmp/navix-key-debug.log`
+  - `/tmp/navix-copy-key-debug.log`
+- Source users: see `DEVELOPING.md` for `--debug-log` modes and environment-based logging.

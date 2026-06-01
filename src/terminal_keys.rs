@@ -46,6 +46,14 @@ fn csi_tilde_sequence(code: u16, modifiers: KeyModifiers) -> Vec<u8> {
     }
 }
 
+fn csi_u_sequence(codepoint: u16, modifiers: KeyModifiers) -> Vec<u8> {
+    if let Some(modifier) = csi_modifier_param(modifiers) {
+        format!("\x1b[{codepoint};{modifier}u").into_bytes()
+    } else {
+        Vec::new()
+    }
+}
+
 fn function_key_sequence(number: u8, modifiers: KeyModifiers) -> Option<Vec<u8>> {
     match number {
         1..=4 => {
@@ -90,7 +98,14 @@ pub(crate) fn terminal_key_bytes(code: KeyCode, modifiers: KeyModifiers) -> Vec<
             }
             bytes
         },
-        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Enter => {
+            let modified = csi_u_sequence(13, modifiers);
+            if modified.is_empty() {
+                vec![b'\r']
+            } else {
+                modified
+            }
+        },
         KeyCode::Backspace => {
             if modifiers.contains(KeyModifiers::ALT) {
                 vec![0x1b, 0x7f]

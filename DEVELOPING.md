@@ -22,6 +22,8 @@ Developer-focused runtime notes, environment variables, and logging workflows.
 ## Runtime Flags
 
 - `--no-mouse-capture`: disable startup mouse capture.
+- `--debug-log`: enable both key debug logs to `/tmp` (`all` mode).
+- `--debug-log=<MODE>`: select debug log mode (`all`, `key`, or `copy`).
 - `--path <PATH>`: startup path (directory or file).
 - `--navigation`: startup focus = Navigation (default).
 - `--preview`: startup focus = Preview.
@@ -40,6 +42,8 @@ Developer-focused runtime notes, environment variables, and logging workflows.
 - `NAVIX_COPY_KEY_DEBUG` (`1|true|yes`): enable copy-shortcut-only key logging.
 - `NAVIX_COPY_KEY_DEBUG_FILE`: output path for copy debug log.
   - Default: `/tmp/navix-copy-key-debug.log`
+
+When `--debug-log` is passed, CLI mode takes precedence and sets debug env vars automatically.
 
 ### Shell / Editor Runtime
 
@@ -63,27 +67,19 @@ Developer-focused runtime notes, environment variables, and logging workflows.
 ### Full key-event logging
 
 ```bash
-NAVIX_KEY_DEBUG=1 \
-NAVIX_KEY_DEBUG_FILE=/tmp/navix-key-debug.log \
-./bin/navix --preview
+./bin/navix --debug-log=key --preview
 ```
 
 ### Copy shortcut logging only
 
 ```bash
-NAVIX_COPY_KEY_DEBUG=1 \
-NAVIX_COPY_KEY_DEBUG_FILE=/tmp/navix-copy-key-debug.log \
-./bin/navix --shell
+./bin/navix --debug-log=copy --shell
 ```
 
 ### Both logs enabled
 
 ```bash
-NAVIX_KEY_DEBUG=1 \
-NAVIX_KEY_DEBUG_FILE=/tmp/navix-key-debug.log \
-NAVIX_COPY_KEY_DEBUG=1 \
-NAVIX_COPY_KEY_DEBUG_FILE=/tmp/navix-copy-key-debug.log \
-./bin/navix --path ~/repos/navix
+./bin/navix --debug-log --path ~/repos/navix
 ```
 
 ### Inspect logs while running
