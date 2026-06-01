@@ -93,6 +93,13 @@ pub(crate) fn preview_overlay_is_interactive(
     presentation == Some(PreviewOverlayPresentation::InteractiveFullscreenDim)
 }
 
+pub(crate) fn preview_overlay_should_pass_keys_to_child(
+    presentation: Option<PreviewOverlayPresentation>,
+    session_running: bool,
+) -> bool {
+    preview_overlay_is_interactive(presentation) || session_running
+}
+
 pub(crate) fn next_preview_overlay_presentation(
     current: Option<PreviewOverlayPresentation>,
     alt_screen_active: bool,
