@@ -33,12 +33,14 @@ cargo run --manifest-path Cargo.toml
 ./bin/navix --no-mouse-capture
 ```
 
-## Showcase
+## Demo v0.3.2
 
-![Navix demo](docs/screenshots/navix-demo.gif)
-![Navix navigation startup](docs/screenshots/navix-navigation.png)
-![Navix preview startup](docs/screenshots/navix-preview.png)
-![Navix shell startup](docs/screenshots/navix-shell.png)
+![Navix demo](docs/demo-v0.3.2/navix-demo.gif)
+![Navix navigation panel](docs/demo-v0.3.2/navix-navigation.png)
+![Navix preview panel](docs/demo-v0.3.2/navix-preview.png)
+![Navix shell panel](docs/demo-v0.3.2/navix-shell.png)
+![Navix help overlay](docs/demo-v0.3.2/navix-help.png)
+![Navix config overlay](docs/demo-v0.3.2/navix-config.png)
 
 ## Core Keys
 
@@ -48,6 +50,31 @@ cargo run --manifest-path Cargo.toml
 - `Ctrl+d`: exit
 
 For full behavior and exact panel semantics, see `docs/CURRENT_BEHAVIOR.md`.
+
+## Reporting Issues
+
+When reporting a bug, include:
+
+- OS + terminal emulator
+- navix version (`./navix --version`)
+- exact repro steps
+- expected vs actual behavior
+
+If the bug is not easy to reproduce, logs are required. If possible, always include logs.
+
+From release artifacts (same folder as the `navix` binary):
+
+```bash
+# collect both debug logs into /tmp while reproducing
+./navix --debug-log=all
+```
+
+After reproducing, attach these files to the GitHub issue:
+
+- `/tmp/navix-key-debug.log`
+- `/tmp/navix-copy-key-debug.log`
+
+If you are running from source instead of release artifacts, see `DEVELOPING.md` for debug log modes and examples.
 
 ## Documentation
 

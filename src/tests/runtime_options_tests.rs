@@ -6,6 +6,7 @@ fn parse_runtime_options_defaults_to_navigation_focus() {
     assert!(options.navix_mouse_capture);
     assert_eq!(options.startup_focus, ActivePane::Navigation);
     assert_eq!(options.startup_path, None);
+    assert_eq!(options.debug_log, None);
 }
 
 #[test]
@@ -56,6 +57,30 @@ fn parse_runtime_options_removes_dot_alias_for_mouse_capture() {
     let alias_error =
         parse_runtime_options_from_args(vec!["--no.mouse-capture"]).expect_err("alias removed");
     assert!(alias_error.contains("Unknown option: --no.mouse-capture"));
+}
+
+#[test]
+fn parse_runtime_options_enables_debug_log_flag() {
+    let options = parse_runtime_options_from_args(vec!["--debug-log"]).expect("debug log");
+    assert_eq!(options.debug_log, Some(DebugLogMode::All));
+}
+
+#[test]
+fn parse_runtime_options_supports_debug_log_modes() {
+    let key = parse_runtime_options_from_args(vec!["--debug-log=key"]).expect("key debug");
+    assert_eq!(key.debug_log, Some(DebugLogMode::Key));
+
+    let copy = parse_runtime_options_from_args(vec!["--debug-log=copy"]).expect("copy debug");
+    assert_eq!(copy.debug_log, Some(DebugLogMode::Copy));
+
+    let all = parse_runtime_options_from_args(vec!["--debug-log=all"]).expect("all debug");
+    assert_eq!(all.debug_log, Some(DebugLogMode::All));
+}
+
+#[test]
+fn parse_runtime_options_rejects_unknown_debug_log_mode() {
+    let err = parse_runtime_options_from_args(vec!["--debug-log=verbose"]).expect_err("invalid");
+    assert!(err.contains("Invalid value for --debug-log"));
 }
 
 #[test]

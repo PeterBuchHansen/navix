@@ -293,6 +293,22 @@ fn preview_overlay_presentation_promotes_to_interactive_on_alt_screen() {
 }
 
 #[test]
+fn preview_overlay_passes_keys_to_running_static_sessions() {
+    assert!(preview_overlay_should_pass_keys_to_child(
+        Some(PreviewOverlayPresentation::StaticFullscreen),
+        true,
+    ));
+}
+
+#[test]
+fn preview_overlay_does_not_pass_keys_when_static_session_has_exited() {
+    assert!(!preview_overlay_should_pass_keys_to_child(
+        Some(PreviewOverlayPresentation::StaticFullscreen),
+        false,
+    ));
+}
+
+#[test]
 fn preview_overlay_auto_close_only_for_interactive_exit() {
     assert!(!should_auto_close_preview_overlay(
         Some(PreviewOverlayPresentation::StaticFullscreen),
