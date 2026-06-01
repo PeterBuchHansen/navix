@@ -44,6 +44,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 mod alt_screen;
@@ -120,8 +121,8 @@ pub(crate) use runtime_helpers::window_bounds;
 pub(crate) use runtime_helpers::{
     child_mouse_capture_required, is_fullish_layout_state, next_preview_overlay_presentation,
     poll_timeout_for_drain, prefill_shell_input_bytes, preview_overlay_is_interactive,
-    scrollbar_thumb_bounds, shell_output_burst_update, shell_panel_height,
-    should_auto_close_preview_overlay, should_show_scrollbar,
+    preview_overlay_should_pass_keys_to_child, scrollbar_thumb_bounds, shell_output_burst_update,
+    shell_panel_height, should_auto_close_preview_overlay, should_show_scrollbar,
     should_throttle_mouse_passthrough_redraw, visible_range,
 };
 pub(crate) use shell::{ShellMetrics, ShellPane, shell_single_quote};
@@ -159,6 +160,7 @@ pub(crate) use tui::{preview_directory_panel_text, preview_file_commands_panel_t
 
 const MAX_OUTPUT_CHUNKS_PER_TICK: usize = 512;
 const MAX_OUTPUT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+static TERMINATION_SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 const PREVIEW_FILE_MAX_BYTES: usize = 16 * 1024;
 
@@ -167,6 +169,14 @@ struct RuntimeOptions {
     navix_mouse_capture: bool,
     startup_focus: ActivePane,
     startup_path: Option<String>,
+    debug_log: Option<DebugLogMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DebugLogMode {
+    Key,
+    Copy,
+    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,11 +187,90 @@ enum RuntimeCommand {
 }
 
 fn runtime_usage() -> &'static str {
-    "Usage: navix [--no-mouse-capture] [--path <PATH>] [--navigation | --preview | --shell]"
+    "Usage: navix [--no-mouse-capture] [--debug-log[=all|key|copy]] [--path <PATH>] [--navigation | --preview | --shell]"
 }
 
 fn runtime_version() -> String {
     format!("navix {}", env!("CARGO_PKG_VERSION"))
+}
+
+extern "C" fn handle_termination_signal(_: libc::c_int) {
+    TERMINATION_SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
+}
+
+fn install_termination_signal_handlers() -> io::Result<()> {
+    let signals = [libc::SIGHUP, libc::SIGINT, libc::SIGTERM, libc::SIGQUIT];
+    for signal in signals {
+        let previous = unsafe {
+            libc::signal(
+                signal,
+                handle_termination_signal as *const () as libc::sighandler_t,
+            )
+        };
+        if previous == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+fn termination_signal_pending() -> bool {
+    TERMINATION_SIGNAL_RECEIVED.swap(false, Ordering::Relaxed)
+}
+
+fn apply_startup_overlay_from_env(app: &mut App) {
+    let Ok(raw) = std::env::var("NAVIX_STARTUP_OVERLAY") else {
+        return;
+    };
+    let overlay = raw.trim().to_ascii_lowercase();
+    match overlay.as_str() {
+        "help" => app.open_help(),
+        "config" => {
+            app.close_preview_command_overlay();
+            app.open_config();
+        },
+        _ => {},
+    }
+}
+
+fn parse_debug_log_mode(value: &str) -> Result<DebugLogMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(DebugLogMode::All),
+        "key" => Ok(DebugLogMode::Key),
+        "copy" => Ok(DebugLogMode::Copy),
+        _ => Err(format!(
+            "Invalid value for --debug-log: {value}. Expected one of: all, key, copy.\n{}",
+            runtime_usage()
+        )),
+    }
+}
+
+fn apply_runtime_debug_log_option(mode: Option<DebugLogMode>) {
+    let Some(mode) = mode else {
+        return;
+    };
+    unsafe {
+        std::env::remove_var("NAVIX_KEY_DEBUG");
+        std::env::remove_var("NAVIX_KEY_DEBUG_FILE");
+        std::env::remove_var("NAVIX_COPY_KEY_DEBUG");
+        std::env::remove_var("NAVIX_COPY_KEY_DEBUG_FILE");
+    }
+    match mode {
+        DebugLogMode::Key => unsafe {
+            std::env::set_var("NAVIX_KEY_DEBUG", "1");
+            std::env::set_var("NAVIX_KEY_DEBUG_FILE", "/tmp/navix-key-debug.log");
+        },
+        DebugLogMode::Copy => unsafe {
+            std::env::set_var("NAVIX_COPY_KEY_DEBUG", "1");
+            std::env::set_var("NAVIX_COPY_KEY_DEBUG_FILE", "/tmp/navix-copy-key-debug.log");
+        },
+        DebugLogMode::All => unsafe {
+            std::env::set_var("NAVIX_KEY_DEBUG", "1");
+            std::env::set_var("NAVIX_KEY_DEBUG_FILE", "/tmp/navix-key-debug.log");
+            std::env::set_var("NAVIX_COPY_KEY_DEBUG", "1");
+            std::env::set_var("NAVIX_COPY_KEY_DEBUG_FILE", "/tmp/navix-copy-key-debug.log");
+        },
+    }
 }
 
 fn set_startup_focus_option(
@@ -212,6 +301,7 @@ where
         navix_mouse_capture: true,
         startup_focus: ActivePane::Navigation,
         startup_path: None,
+        debug_log: None,
     };
     let mut seen_focus_flag: Option<&'static str> = None;
     let mut iter = args.into_iter().map(Into::into);
@@ -223,9 +313,16 @@ where
             options.startup_path = Some(path_value.to_string());
             continue;
         }
+        if let Some(debug_log_mode) = arg.strip_prefix("--debug-log=") {
+            options.debug_log = Some(parse_debug_log_mode(debug_log_mode)?);
+            continue;
+        }
         match arg.as_str() {
             "--no-mouse-capture" => {
                 options.navix_mouse_capture = false;
+            },
+            "--debug-log" => {
+                options.debug_log = Some(DebugLogMode::All);
             },
             "--navigation" => {
                 set_startup_focus_option(
@@ -594,6 +691,9 @@ fn main() {
 }
 
 fn run(options: RuntimeOptions) -> io::Result<()> {
+    TERMINATION_SIGNAL_RECEIVED.store(false, Ordering::Relaxed);
+    install_termination_signal_handlers()?;
+    apply_runtime_debug_log_option(options.debug_log);
     let editor_program = ensure_editor_program()?;
     let startup_path_option = if let Some(path_value) = options.startup_path.as_deref() {
         let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
@@ -611,6 +711,7 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
         app.record_preview_jump_history(&startup_path_option.history_target);
     }
     app.active = options.startup_focus;
+    apply_startup_overlay_from_env(&mut app);
     let command_copy_enabled = terminal_prefers_command_copy();
     let mut copy_key_debug_log = open_copy_key_debug_log();
     let mut copy_key_debug_seq: u64 = 0;
@@ -622,6 +723,9 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
     let mut last_navigation_click: Option<(usize, Instant)> = None;
 
     loop {
+        if termination_signal_pending() {
+            break;
+        }
         app.tick_feedback();
         let shell_drain = app.shell.poll_output();
         let (next_shell_output_burst_active, refresh_navigation_now) = shell_output_burst_update(
@@ -1863,7 +1967,21 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                 continue;
             }
             if let Some(session) = app.preview_command_shell.as_mut() {
-                if preview_overlay_is_interactive(app.preview_command_overlay_presentation) {
+                let interactive_presentation =
+                    preview_overlay_is_interactive(app.preview_command_overlay_presentation);
+                let pass_keys_to_child = preview_overlay_should_pass_keys_to_child(
+                    app.preview_command_overlay_presentation,
+                    session.is_running(),
+                );
+                if pass_keys_to_child {
+                    if !interactive_presentation
+                        && key.code == KeyCode::Esc
+                        && key.modifiers.is_empty()
+                    {
+                        app.close_preview_command_overlay();
+                        app.active = ActivePane::Navigation;
+                        continue;
+                    }
                     session.send_key(key)?;
                     continue;
                 }

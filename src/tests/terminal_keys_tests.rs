@@ -34,6 +34,18 @@ fn terminal_key_bytes_supports_home_end_delete_and_function_keys() {
         terminal_key_bytes(KeyCode::BackTab, KeyModifiers::NONE),
         b"\x1b[Z"
     );
+    assert_eq!(
+        terminal_key_bytes(KeyCode::Enter, KeyModifiers::NONE),
+        b"\r"
+    );
+    assert_eq!(
+        terminal_key_bytes(KeyCode::Enter, KeyModifiers::SHIFT),
+        b"\x1b[13;2u"
+    );
+    assert_eq!(
+        terminal_key_bytes(KeyCode::Enter, KeyModifiers::CONTROL),
+        b"\x1b[13;5u"
+    );
 }
 
 #[test]
