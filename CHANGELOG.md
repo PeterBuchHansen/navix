@@ -8,6 +8,28 @@ All notable changes to this project are documented here.
 
 - No changes yet.
 
+## [0.3.2] - 2026-06-01
+
+### Added
+
+- Added v0.3.2 demo assets under `docs/demo-v0.3.2` and refreshed the demo generation script defaults.
+- Added an issue-linked branch naming convention in `CONTRIBUTING.md` for parent and sub-branch workflows.
+
+### Changed
+
+- Bumped package version to `0.3.2` and updated README demo references to the v0.3.2 asset set.
+- Refined issue-reporting/docs guidance (`README.md`, `DEVELOPING.md`, and issue template) for clearer diagnostics and runtime context.
+
+### Fixed
+
+- Preview command overlay now forwards keys to running read-session commands even when they are not detected as alt-screen, restoring navigation for tools like `markless`.
+- Shell PTY key forwarding now preserves modified Enter sequences (for example `Shift+Enter`) so multiline prompts work in embedded CLI tools.
+
+### Tests
+
+- Added regression tests for preview overlay key passthrough behavior and modified Enter forwarding.
+- Expanded runtime option and terminal key coverage around the new release behavior.
+
 ## [0.3.1] - 2026-05-28
 
 ### Added
