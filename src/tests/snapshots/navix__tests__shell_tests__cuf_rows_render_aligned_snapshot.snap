@@ -1,0 +1,6 @@
+---
+source: src/tests/shell_tests.rs
+expression: terminal.backend()
+---
+"   #    "
+"   #    "

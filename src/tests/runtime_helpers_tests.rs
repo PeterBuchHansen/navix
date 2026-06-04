@@ -41,6 +41,7 @@ fn poll_timeout_for_drain_is_zero_when_backlog_hits_limit() {
     let timeout = poll_timeout_for_drain(OutputDrain {
         processed_chunks: 12,
         hit_limit: true,
+        screen_changed: false,
     });
     assert_eq!(timeout, Duration::from_millis(0));
 }
@@ -50,6 +51,7 @@ fn poll_timeout_for_drain_is_short_when_processing_output() {
     let timeout = poll_timeout_for_drain(OutputDrain {
         processed_chunks: 1,
         hit_limit: false,
+        screen_changed: false,
     });
     assert_eq!(timeout, Duration::from_millis(5));
 }
@@ -59,6 +61,7 @@ fn poll_timeout_for_drain_is_idle_when_no_output() {
     let timeout = poll_timeout_for_drain(OutputDrain {
         processed_chunks: 0,
         hit_limit: false,
+        screen_changed: false,
     });
     assert_eq!(timeout, Duration::from_millis(80));
 }
@@ -68,8 +71,111 @@ fn poll_timeout_for_drain_prioritizes_hit_limit() {
     let timeout = poll_timeout_for_drain(OutputDrain {
         processed_chunks: 0,
         hit_limit: true,
+        screen_changed: false,
     });
     assert_eq!(timeout, Duration::from_millis(0));
+}
+
+#[test]
+fn defer_repaint_only_when_redraw_wanted_and_writer_busy() {
+    // Repaint must wait only when there is something to paint AND a graphics
+    // transfer is in flight (painting would corrupt the in-flight image).
+    assert!(defer_repaint_for_graphics(true, true));
+    // Nothing to paint: nothing to defer.
+    assert!(!defer_repaint_for_graphics(false, true));
+    // Writer idle: paint immediately.
+    assert!(!defer_repaint_for_graphics(true, false));
+    assert!(!defer_repaint_for_graphics(false, false));
+}
+
+#[test]
+fn positioned_graphics_reflush_waits_for_idle_async_writer() {
+    // Positioned (iTerm2) reflush is drained and routed to the async writer
+    // only while that writer is idle, matching the kitty path: a transfer in
+    // flight must finish first so the FIFO writer never interleaves blobs.
+    assert!(should_flush_positioned_graphics(false));
+    assert!(!should_flush_positioned_graphics(true));
+}
+
+#[test]
+fn composited_redraw_skipped_when_nothing_changed() {
+    assert!(!should_composited_redraw(
+        false, false, false, false, false, false,
+    ));
+}
+
+#[test]
+fn composited_redraw_when_grid_changed() {
+    assert!(should_composited_redraw(
+        true, false, false, false, false, false,
+    ));
+}
+
+#[test]
+fn composited_redraw_when_input_forces_draw() {
+    assert!(should_composited_redraw(
+        false, true, false, false, false, false,
+    ));
+}
+
+#[test]
+fn composited_redraw_on_force_clear_left_fullish_or_nav_refresh() {
+    assert!(should_composited_redraw(
+        false, false, true, false, false, false,
+    ));
+    assert!(should_composited_redraw(
+        false, false, false, true, false, false,
+    ));
+    assert!(should_composited_redraw(
+        false, false, false, false, true, false,
+    ));
+}
+
+#[test]
+fn composited_redraw_when_graphics_pending_so_placeholders_repaint() {
+    assert!(should_composited_redraw(
+        false, false, false, false, false, true,
+    ));
+}
+
+#[test]
+fn input_batch_never_stops_before_first_read() {
+    // batched == 0: must always read at least once, regardless of buffer state,
+    // so a `continue` in the handler can never block on an empty queue.
+    assert!(!should_stop_input_batch(0, false, 256));
+    assert!(!should_stop_input_batch(0, true, 256));
+}
+
+#[test]
+fn input_batch_stops_when_nothing_more_buffered() {
+    assert!(should_stop_input_batch(1, false, 256));
+}
+
+#[test]
+fn input_batch_continues_while_events_remain_buffered() {
+    assert!(!should_stop_input_batch(5, true, 256));
+}
+
+#[test]
+fn input_batch_stops_at_cap_even_with_more_buffered() {
+    assert!(should_stop_input_batch(256, true, 256));
+}
+
+#[test]
+fn merge_output_drains_ors_screen_changed() {
+    let merged = merge_output_drains(
+        OutputDrain {
+            processed_chunks: 0,
+            hit_limit: false,
+            screen_changed: false,
+        },
+        OutputDrain {
+            processed_chunks: 1,
+            hit_limit: false,
+            screen_changed: true,
+        },
+    );
+    assert!(merged.screen_changed);
 }
 
 #[test]
@@ -137,6 +243,7 @@ fn should_throttle_static_preview_redraw_only_when_passthrough_is_stable_and_idl
         OutputDrain {
             processed_chunks: 0,
             hit_limit: false,
+            screen_changed: false,
         },
         false,
         false,
@@ -147,6 +254,7 @@ fn should_throttle_static_preview_redraw_only_when_passthrough_is_stable_and_idl
         OutputDrain {
             processed_chunks: 0,
             hit_limit: false,
+            screen_changed: false,
         },
         false,
         false,
@@ -157,6 +265,7 @@ fn should_throttle_static_preview_redraw_only_when_passthrough_is_stable_and_idl
         OutputDrain {
             processed_chunks: 1,
             hit_limit: false,
+            screen_changed: false,
         },
         false,
         false,
@@ -167,6 +276,7 @@ fn should_throttle_static_preview_redraw_only_when_passthrough_is_stable_and_idl
         OutputDrain {
             processed_chunks: 0,
             hit_limit: true,
+            screen_changed: false,
         },
         false,
         false,
@@ -177,6 +287,7 @@ fn should_throttle_static_preview_redraw_only_when_passthrough_is_stable_and_idl
         OutputDrain {
             processed_chunks: 0,
             hit_limit: false,
+            screen_changed: false,
         },
         true,
         false,
@@ -187,6 +298,7 @@ fn should_throttle_static_preview_redraw_only_when_passthrough_is_stable_and_idl
         OutputDrain {
             processed_chunks: 0,
             hit_limit: false,
+            screen_changed: false,
         },
         false,
         true,
@@ -297,6 +409,7 @@ fn preview_overlay_passes_keys_to_running_static_sessions() {
     assert!(preview_overlay_should_pass_keys_to_child(
         Some(PreviewOverlayPresentation::StaticFullscreen),
         true,
+        Some(PreviewCommandMode::Write),
     ));
 }
 
@@ -305,6 +418,25 @@ fn preview_overlay_does_not_pass_keys_when_static_session_has_exited() {
     assert!(!preview_overlay_should_pass_keys_to_child(
         Some(PreviewOverlayPresentation::StaticFullscreen),
         false,
+        Some(PreviewCommandMode::Write),
+    ));
+}
+
+#[test]
+fn preview_overlay_does_not_pass_keys_to_running_read_sessions_in_static_mode() {
+    assert!(!preview_overlay_should_pass_keys_to_child(
+        Some(PreviewOverlayPresentation::StaticFullscreen),
+        true,
+        Some(PreviewCommandMode::Read),
+    ));
+}
+
+#[test]
+fn preview_overlay_passes_keys_to_interactive_read_sessions() {
+    assert!(preview_overlay_should_pass_keys_to_child(
+        Some(PreviewOverlayPresentation::InteractiveFullscreenDim),
+        true,
+        Some(PreviewCommandMode::Read),
     ));
 }
 
