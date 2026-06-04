@@ -20,6 +20,11 @@ use super::*;
 pub(crate) struct OutputDrain {
     pub(crate) processed_chunks: usize,
     pub(crate) hit_limit: bool,
+    /// True when the child's text grid changed this tick (vt100 received text
+    /// events). Graphics-only output (e.g. a kitty image (re)transmit that only
+    /// touches the image store, not the placeholder cells) leaves this false, so
+    /// the composited frame can be skipped — the visible grid is unchanged.
+    pub(crate) screen_changed: bool,
 }
 
 pub(crate) fn merge_output_drains(primary: OutputDrain, secondary: OutputDrain) -> OutputDrain {
@@ -28,7 +33,32 @@ pub(crate) fn merge_output_drains(primary: OutputDrain, secondary: OutputDrain) 
             .processed_chunks
             .saturating_add(secondary.processed_chunks),
         hit_limit: primary.hit_limit || secondary.hit_limit,
+        screen_changed: primary.screen_changed || secondary.screen_changed,
     }
+}
+
+/// Decide whether the composited frame must be rebuilt this iteration.
+///
+/// The double-loop previously redrew on every iteration, rebuilding the whole
+/// ratatui buffer (vt100 rows -> styled bytes -> ansi-to-tui -> diff) even when
+/// nothing visible changed. That wasted CPU is what starved input handling and
+/// made scrolling — and `Ctrl+C` mid-scroll — feel laggy. Redraw only when a
+/// render input actually changed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn should_composited_redraw(
+    screen_changed: bool,
+    force_draw: bool,
+    force_clear: bool,
+    left_fullish_layout: bool,
+    refresh_navigation: bool,
+    graphics_pending: bool,
+) -> bool {
+    screen_changed
+        || force_draw
+        || force_clear
+        || left_fullish_layout
+        || refresh_navigation
+        || graphics_pending
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,4 +235,9 @@ pub(crate) struct App {
     pub(crate) force_terminal_clear: bool,
     pub(crate) mouse_selection: Option<PanelSelection>,
     pub(crate) render_snapshot: RenderTextSnapshot,
+    // Most recent full terminal area, refreshed each loop iteration. Lets the
+    // preview overlay spawn its child PTY at the exact geometry it will render
+    // into (see `preview_overlay_content_area`) so a nested tool paints once at
+    // the right size instead of reconciling a resize seam on its first frame.
+    pub(crate) last_terminal_area: ratatui::layout::Rect,
 }
