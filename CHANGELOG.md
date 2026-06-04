@@ -8,6 +8,45 @@ All notable changes to this project are documented here.
 
 - No changes yet.
 
+## [0.3.3] - 2026-06-04
+
+Embedded terminal graphics: nested TUI tools (document readers, image viewers,
+and other terminal programs) now render inline images and behave as a 1:1
+passthrough of the host terminal inside both the Shell and Preview panes.
+
+### Added
+
+- Embedded graphics-protocol support for nested tools in the Shell and Preview panes: Kitty graphics (primary on Linux/Ghostty) and iTerm2 inline images (primary on macOS), with each tool's own halfblock output left intact as a fallback (#3).
+- `GraphicsStreamParser` that separates graphics escape sequences (Kitty/iTerm2) from text output so images and the text grid are handled independently (#3).
+- Off-thread `GraphicsWriter` that performs blocking host graphics writes on a dedicated thread, keeping the main loop responsive (scrolling and `Ctrl-C` stay live) while multi-MB images transfer (#6).
+- Host cell pixel-size detection advertised to child PTYs (winsize pixel fields and CSI 14t/16t replies) so tools reserve the correct number of cells and images render at the intended size (#5).
+- Terminal capability query replies (graphics probes, cell size, background color) answered on behalf of nested tools so they detect support identically to running outside Navix (#3).
+
+### Changed
+
+- Kitty images use true verbatim passthrough (Unicode placeholder method): images scroll and clip at the pane edge exactly as in a bare terminal, instead of being re-decoded or resized (#3).
+- iTerm2's positioned (cursor-placed) image reflush is routed through the same off-thread `GraphicsWriter` as Kitty, so large inline images no longer block the main loop (#6).
+- Composited rendering now skips redraws when neither the visible screen grid nor UI state changed (dirty-skip), and repaints defer while a graphics write is in flight to avoid corrupting an in-flight image (#6).
+- Input events are batch-drained per tick so heavy nested-tool output and fast scrolling stay responsive and exit is not delayed behind a backlog (#8).
+- Identical back-to-back Kitty image transfers are de-duplicated to prevent re-transmit floods from saturating the host during scrolling (#6).
+- `bin/navix` now builds and runs in release mode, and the graphics stream parser uses bulk copying, cutting large-image parse time from seconds to tens of milliseconds (#8).
+- Navix stays tool-agnostic: nested commands run verbatim with no tool-specific command rewriting or injected environment, so any TUI of the user's choice behaves as it would outside Navix (#7).
+
+### Fixed
+
+- Eliminated the image/text "tear" artifact caused by `ansi-to-tui` dropping CSI Cursor-Forward sequences, by expanding CUF into spaces in the Shell and Preview render paths (#4).
+- Inline images no longer render at the wrong size due to a hardcoded advertised cell size (#5).
+- Removed a freeze and input lockup that occurred when scrolling onto large images, caused by a graphics re-transmit backlog and synchronous host writes (#6).
+
+### Docs
+
+- Added the v0.3.2 navigation demo image to `README.md`.
+
+### Tests
+
+- Added coverage for the graphics stream parser, CUF expansion (including an `insta` snapshot), graphics-writer deferral/routing decisions, input batch-draining, Kitty transfer de-duplication, and cell-pixel detection.
+- Introduced `insta` snapshot testing as a dev dependency; the suite now includes 251 passing tests.
+
 ## [0.3.2] - 2026-06-01
 
 ### Added
@@ -22,7 +61,7 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
-- Preview command overlay now forwards keys to running read-session commands even when they are not detected as alt-screen, restoring navigation for tools like `markless`.
+- Preview command overlay now forwards keys to running read-session commands even when they are not detected as alt-screen, restoring navigation for nested terminal tools.
 - Shell PTY key forwarding now preserves modified Enter sequences (for example `Shift+Enter`) so multiline prompts work in embedded CLI tools.
 
 ### Tests

@@ -96,8 +96,10 @@ pub(crate) fn preview_overlay_is_interactive(
 pub(crate) fn preview_overlay_should_pass_keys_to_child(
     presentation: Option<PreviewOverlayPresentation>,
     session_running: bool,
+    mode: Option<PreviewCommandMode>,
 ) -> bool {
-    preview_overlay_is_interactive(presentation) || session_running
+    preview_overlay_is_interactive(presentation)
+        || (session_running && mode == Some(PreviewCommandMode::Write))
 }
 
 pub(crate) fn next_preview_overlay_presentation(
@@ -115,6 +117,30 @@ pub(crate) fn should_auto_close_preview_overlay(
     session_running: bool,
 ) -> bool {
     preview_overlay_is_interactive(presentation) && !session_running
+}
+
+/// While a graphics transfer is being written to the host terminal, the main
+/// thread must not paint a frame: a single image is one indivisible escape
+/// sequence, and a frame's text/escapes written into the middle of it corrupts
+/// the image. Returns true when a wanted repaint must be deferred until the
+/// off-thread writer drains. Deferring also preserves placement — the image
+/// finishes loading before the placeholder cells that position it are drawn.
+pub(crate) fn defer_repaint_for_graphics(needs_redraw: bool, graphics_write_busy: bool) -> bool {
+    needs_redraw && graphics_write_busy
+}
+
+/// The positioned (cursor-placed) image reflush — iTerm2 OSC 1337 — is a host
+/// write just like a kitty transfer, and on a multi-MB image writing it inline
+/// froze the main loop. It is now handed to the same off-thread
+/// [`crate::graphics_writer::GraphicsWriter`] as kitty, so the loop never blocks
+/// on it (protocol- and tool-independent parity). It is drained and routed only
+/// while that writer is idle: the writer is FIFO and holds the stdout lock per
+/// blob, so a kitty transfer already in flight finishes first (no interleave),
+/// and the next repaint defers (see [`defer_repaint_for_graphics`]) until the
+/// image lands. Returns true when the reflush should be drained and routed this
+/// tick.
+pub(crate) fn should_flush_positioned_graphics(graphics_write_busy: bool) -> bool {
+    !graphics_write_busy
 }
 
 pub(crate) fn poll_timeout_for_drain(drain: OutputDrain) -> Duration {
