@@ -22,6 +22,24 @@ Keyboard-first Rust TUI for navigating files, previewing commands, and keeping a
 cargo run --manifest-path Cargo.toml
 ```
 
+## Install with Nix
+
+Navix ships a flake (requires Nix with flakes enabled):
+
+```bash
+# run without installing
+nix run github:PeterBuchHansen/navix
+
+# build the binary into ./result/bin/navix
+nix build github:PeterBuchHansen/navix
+
+# install into your profile
+nix profile install github:PeterBuchHansen/navix
+
+# enter a dev shell (Rust toolchain + rustfmt/clippy/rust-analyzer)
+nix develop
+```
+
 ## Startup Examples
 
 ```bash

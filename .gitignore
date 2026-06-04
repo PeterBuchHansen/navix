@@ -1,3 +1,4 @@
 /.navix-build/
 /.cargo-docker/
 /target/
+/result
