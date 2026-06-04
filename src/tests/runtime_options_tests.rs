@@ -73,6 +73,9 @@ fn parse_runtime_options_supports_debug_log_modes() {
     let copy = parse_runtime_options_from_args(vec!["--debug-log=copy"]).expect("copy debug");
     assert_eq!(copy.debug_log, Some(DebugLogMode::Copy));
 
+    let output = parse_runtime_options_from_args(vec!["--debug-log=output"]).expect("output debug");
+    assert_eq!(output.debug_log, Some(DebugLogMode::Output));
+
     let all = parse_runtime_options_from_args(vec!["--debug-log=all"]).expect("all debug");
     assert_eq!(all.debug_log, Some(DebugLogMode::All));
 }
