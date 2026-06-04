@@ -142,6 +142,7 @@ impl App {
             force_terminal_clear: false,
             mouse_selection: None,
             render_snapshot: RenderTextSnapshot::empty(),
+            last_terminal_area: ratatui::layout::Rect::default(),
         })
     }
 
@@ -620,12 +621,26 @@ impl App {
         } else {
             self.nav_cwd.clone()
         };
-        let spawned_command = if mode == PreviewCommandMode::Read {
-            format!("PAGER=cat BAT_PAGER=cat {command}")
+        // The preview command runs verbatim: Navix is tool-agnostic and does not
+        // rewrite a nested tool's invocation or inject tool-specific environment.
+        let command = command.to_string();
+        // Spawn the preview child at the exact overlay geometry when we already
+        // know the terminal size (refreshed every loop iteration). A nested tool
+        // then paints once at the right size; otherwise it would paint at a
+        // default size and reconcile on the first resize, leaving a seam in dense
+        // regions (images). Falls back to the default size before the first frame.
+        let overlay_inner =
+            crate::preview_overlay_content_area(self.last_terminal_area, self.shell_fullish);
+        let mut session = if overlay_inner.width > 0 && overlay_inner.height > 0 {
+            ShellPane::spawn_command_sized(
+                &command,
+                &cwd,
+                overlay_inner.height.max(1),
+                overlay_inner.width.max(1),
+            )?
         } else {
-            command.to_string()
+            ShellPane::spawn_command(&command, &cwd)?
         };
-        let mut session = ShellPane::spawn_command(&spawned_command, &cwd)?;
         if mode == PreviewCommandMode::Read {
             session.scroll_up(usize::MAX);
         }
@@ -660,6 +675,7 @@ impl App {
             OutputDrain {
                 processed_chunks: 0,
                 hit_limit: false,
+                screen_changed: false,
             }
         }
     }
