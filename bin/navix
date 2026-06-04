@@ -63,7 +63,9 @@ NAVIX_LAUNCH_SHELL="$(detect_launch_shell)"
 export NAVIX_LAUNCH_SHELL
 
 if command -v cargo >/dev/null 2>&1; then
-  exec cargo run --manifest-path "${ROOT_DIR}/Cargo.toml" -- "$@"
+  # Release build: Navix relays multi-megabyte image transfers; a debug build
+  # parses them an order of magnitude slower, which reads as a long hang.
+  exec cargo run --release --manifest-path "${ROOT_DIR}/Cargo.toml" -- "$@"
 fi
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -72,7 +74,9 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 BUILD_DIR="${ROOT_DIR}/.navix-build"
-DOCKER_CARGO_ARGS=(build --manifest-path /work/Cargo.toml)
+# Release build: Navix relays multi-megabyte image transfers; a debug build
+# parses them an order of magnitude slower, which reads as a long hang.
+DOCKER_CARGO_ARGS=(build --release --manifest-path /work/Cargo.toml)
 if [[ -f "${ROOT_DIR}/Cargo.lock" ]]; then
   DOCKER_CARGO_ARGS+=(--locked)
 fi
@@ -85,4 +89,4 @@ docker run --rm \
   rust:1 \
   /usr/local/cargo/bin/cargo "${DOCKER_CARGO_ARGS[@]}"
 
-exec "${BUILD_DIR}/debug/navix" "$@"
+exec "${BUILD_DIR}/release/navix" "$@"

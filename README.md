@@ -2,6 +2,8 @@
 
 Keyboard-first Rust TUI for navigating files, previewing commands, and keeping a live shell in the same workspace.
 
+![Navix navigation panel](docs/demo-v0.3.2/navix-navigation.png)
+
 ## Why Navix
 
 - **Three-pane workflow**: `[1] Navigation`, `[2] Preview`, `[0] Shell`.
