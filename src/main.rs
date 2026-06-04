@@ -52,6 +52,8 @@ mod app_state;
 mod config;
 mod config_ui;
 mod file_logic;
+mod graphics_stream;
+mod graphics_writer;
 mod input_routing;
 mod navigation;
 mod panel_layout;
@@ -92,6 +94,8 @@ pub(crate) use file_logic::{
     simple_permission_bits,
 };
 #[cfg(test)]
+pub(crate) use graphics_stream::{GraphicsProtocol, StreamEvent};
+#[cfg(test)]
 pub(crate) use input_routing::preview_shortcut_target;
 #[cfg(test)]
 pub(crate) use input_routing::terminal_prefers_command_copy_from_env;
@@ -119,28 +123,34 @@ pub(crate) use runtime_helpers::is_fullish_shell_mode;
 #[cfg(test)]
 pub(crate) use runtime_helpers::window_bounds;
 pub(crate) use runtime_helpers::{
-    child_mouse_capture_required, is_fullish_layout_state, next_preview_overlay_presentation,
-    poll_timeout_for_drain, prefill_shell_input_bytes, preview_overlay_is_interactive,
-    preview_overlay_should_pass_keys_to_child, scrollbar_thumb_bounds, shell_output_burst_update,
-    shell_panel_height, should_auto_close_preview_overlay, should_show_scrollbar,
+    child_mouse_capture_required, defer_repaint_for_graphics, is_fullish_layout_state,
+    next_preview_overlay_presentation, poll_timeout_for_drain, prefill_shell_input_bytes,
+    preview_overlay_is_interactive, preview_overlay_should_pass_keys_to_child,
+    scrollbar_thumb_bounds, shell_output_burst_update, shell_panel_height,
+    should_auto_close_preview_overlay, should_flush_positioned_graphics, should_show_scrollbar,
     should_throttle_mouse_passthrough_redraw, visible_range,
 };
-pub(crate) use shell::{ShellMetrics, ShellPane, shell_single_quote};
+pub(crate) use shell::{ShellMetrics, ShellPane, shell_single_quote, wrap_graphics_passthrough};
 #[cfg(test)]
 pub(crate) use shell::{
-    bash_history_sync_prompt_command, cd_to_bytes, default_history_file_for_shell,
-    resolve_launch_shell_path_with, shell_program_name,
+    bash_history_sync_prompt_command, cd_to_bytes, dedup_kitty_transfer,
+    default_history_file_for_shell, kitty_graphics_query_reply_for_test,
+    kitty_multipart_flush_summary_for_test, kitty_passthrough_staging_for_test,
+    parse_stream_events_for_test, placeholder_buffer_layout_for_test,
+    placeholder_render_survival_for_test, resolve_child_term_for_test,
+    resolve_launch_shell_path_with, shell_program_name, terminal_query_replies_for_test,
 };
 #[cfg(test)]
 pub(crate) use shell::{parse_scrollback_limit, resolve_scrollback_limit};
 pub(crate) use state::{
     ActivePane, App, EffectiveAccess, EffectiveIdentity, NavigationFileCommandAction, OutputDrain,
     PanePoint, PanelSelection, PreviewCommandMode, PreviewMode, PreviewOverlayPresentation,
-    RenderTextSnapshot, merge_output_drains,
+    RenderTextSnapshot, merge_output_drains, should_composited_redraw,
 };
 pub(crate) use terminal_keys::{terminal_key_bytes, terminal_mouse_bytes};
 pub(crate) use terminal_runtime::{
-    TerminalGuard, ensure_editor_program, open_copy_key_debug_log, open_key_debug_log, to_io,
+    TerminalGuard, ensure_editor_program, open_copy_key_debug_log, open_key_debug_log,
+    open_output_debug_log, to_io,
 };
 #[cfg(test)]
 pub(crate) use theme::sgr_to_style;
@@ -158,8 +168,16 @@ pub(crate) use tui::{compose_footer_line, footer_shortcuts};
 #[cfg(test)]
 pub(crate) use tui::{preview_directory_panel_text, preview_file_commands_panel_text};
 
-const MAX_OUTPUT_CHUNKS_PER_TICK: usize = 512;
-const MAX_OUTPUT_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+const MAX_OUTPUT_CHUNKS_PER_TICK: usize = 16384;
+// Raw read ceiling per poll tick. High enough that a single multi-megabyte
+// graphics transfer (forwarded verbatim, cheaply) drains in one tick instead of
+// dribbling across many frames. vt100 text parsing — the actually-expensive
+// work — is bounded separately by MAX_TEXT_BYTES_PER_TICK.
+const MAX_OUTPUT_BYTES_PER_TICK: usize = 32 * 1024 * 1024;
+// Bound on text bytes fed to the vt100 parser per tick. Keeps a text flood from
+// stalling a frame even though the raw/graphics ceilings are large.
+const MAX_TEXT_BYTES_PER_TICK: usize = 512 * 1024;
+const PREVIEW_MOUSE_SCROLL_STEP_ROWS: usize = 1;
 static TERMINATION_SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 const PREVIEW_FILE_MAX_BYTES: usize = 16 * 1024;
@@ -176,6 +194,7 @@ struct RuntimeOptions {
 enum DebugLogMode {
     Key,
     Copy,
+    Output,
     All,
 }
 
@@ -187,7 +206,7 @@ enum RuntimeCommand {
 }
 
 fn runtime_usage() -> &'static str {
-    "Usage: navix [--no-mouse-capture] [--debug-log[=all|key|copy]] [--path <PATH>] [--navigation | --preview | --shell]"
+    "Usage: navix [--no-mouse-capture] [--debug-log[=all|key|copy|output]] [--path <PATH>] [--navigation | --preview | --shell]"
 }
 
 fn runtime_version() -> String {
@@ -238,8 +257,9 @@ fn parse_debug_log_mode(value: &str) -> Result<DebugLogMode, String> {
         "all" => Ok(DebugLogMode::All),
         "key" => Ok(DebugLogMode::Key),
         "copy" => Ok(DebugLogMode::Copy),
+        "output" => Ok(DebugLogMode::Output),
         _ => Err(format!(
-            "Invalid value for --debug-log: {value}. Expected one of: all, key, copy.\n{}",
+            "Invalid value for --debug-log: {value}. Expected one of: all, key, copy, output.\n{}",
             runtime_usage()
         )),
     }
@@ -254,6 +274,8 @@ fn apply_runtime_debug_log_option(mode: Option<DebugLogMode>) {
         std::env::remove_var("NAVIX_KEY_DEBUG_FILE");
         std::env::remove_var("NAVIX_COPY_KEY_DEBUG");
         std::env::remove_var("NAVIX_COPY_KEY_DEBUG_FILE");
+        std::env::remove_var("NAVIX_OUTPUT_DEBUG");
+        std::env::remove_var("NAVIX_OUTPUT_DEBUG_FILE");
     }
     match mode {
         DebugLogMode::Key => unsafe {
@@ -264,11 +286,17 @@ fn apply_runtime_debug_log_option(mode: Option<DebugLogMode>) {
             std::env::set_var("NAVIX_COPY_KEY_DEBUG", "1");
             std::env::set_var("NAVIX_COPY_KEY_DEBUG_FILE", "/tmp/navix-copy-key-debug.log");
         },
+        DebugLogMode::Output => unsafe {
+            std::env::set_var("NAVIX_OUTPUT_DEBUG", "1");
+            std::env::set_var("NAVIX_OUTPUT_DEBUG_FILE", "/tmp/navix-output-debug.log");
+        },
         DebugLogMode::All => unsafe {
             std::env::set_var("NAVIX_KEY_DEBUG", "1");
             std::env::set_var("NAVIX_KEY_DEBUG_FILE", "/tmp/navix-key-debug.log");
             std::env::set_var("NAVIX_COPY_KEY_DEBUG", "1");
             std::env::set_var("NAVIX_COPY_KEY_DEBUG_FILE", "/tmp/navix-copy-key-debug.log");
+            std::env::set_var("NAVIX_OUTPUT_DEBUG", "1");
+            std::env::set_var("NAVIX_OUTPUT_DEBUG_FILE", "/tmp/navix-output-debug.log");
         },
     }
 }
@@ -690,6 +718,44 @@ fn main() {
     }
 }
 
+/// Exact content (inner) Rect of the preview overlay for a given terminal area.
+/// Mirrors the draw-loop layout (footer row, shell panel split, nav/preview
+/// column split with the preview maximized) so the preview child PTY can be
+/// spawned at the geometry it will render into. A nested tool then paints once
+/// at the correct size instead of painting at a default size and reconciling on
+/// its first resize, which leaves a static seam in dense regions (e.g. images).
+pub(crate) fn preview_overlay_content_area(area: Rect, shell_fullish: bool) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return Rect::default();
+    }
+    let main_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area)[0];
+    // The overlay forces the Preview pane active.
+    let shell_height = shell_panel_height(main_area.height, ActivePane::Preview, shell_fullish);
+    let top_row = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(shell_height)])
+        .split(main_area)[0];
+    let cols = split_navigation_preview_cols(top_row, false, true);
+    inner(cols[1])
+}
+
+// Cap on input events drained in a single loop iteration. Bounds worst-case
+// work per tick (e.g. a large bracketed paste or a mouse-move flood) so input
+// draining can never starve rendering; the remainder is handled next tick.
+const MAX_INPUT_BATCH_PER_TICK: usize = 256;
+
+/// Whether the input batch loop should stop and re-render. Stops when the cap is
+/// reached, or once at least one event has been handled and nothing more is
+/// buffered. Crucially never stops before the first read (`batched == 0`), and
+/// when it returns `false` the caller reads exactly one more event — so a
+/// `continue` in the handler can never block on an empty input queue.
+pub(crate) fn should_stop_input_batch(batched: usize, more_buffered: bool, max: usize) -> bool {
+    batched >= max || (batched > 0 && !more_buffered)
+}
+
 fn run(options: RuntimeOptions) -> io::Result<()> {
     TERMINATION_SIGNAL_RECEIVED.store(false, Ordering::Relaxed);
     install_termination_signal_handlers()?;
@@ -719,13 +785,30 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
     let mut shell_output_burst_active = false;
     let mut mouse_capture_enabled = options.navix_mouse_capture;
     let mut was_copy_first_mouse_passthrough = false;
-    let mut force_draw_next_iteration = false;
+    // Seed true so the first iteration always paints (the dirty-skip gate below
+    // otherwise has no prior frame to compare against).
+    let mut force_draw_next_iteration = true;
     let mut last_navigation_click: Option<(usize, Instant)> = None;
+    // Host graphics writes (multi-MB image transfers) run on a dedicated thread
+    // so the loop never blocks on terminal back-pressure. While a transfer is in
+    // flight the composited repaint is deferred (see `defer_repaint_for_graphics`)
+    // so its escapes cannot corrupt the in-flight image.
+    let mut gfx_writer = graphics_writer::GraphicsWriter::spawn();
+    // Cap the loop to ~30fps while a child floods output (e.g. a nested TUI
+    // repainting its whole screen on every scroll step). Without a cap the loop
+    // spins at the burst poll interval, re-parsing and re-rendering the entire
+    // screen — and re-forwarding the child's per-repaint graphics transfers — up
+    // to ~200x/sec, which saturates the CPU and floods the host terminal. Pacing
+    // the loop also lets PTY backpressure throttle the child at the source. Input
+    // still wakes `event::poll` immediately, so keystroke latency is unaffected.
+    let frame_interval = Duration::from_millis(33);
 
-    loop {
+    'outer: loop {
         if termination_signal_pending() {
             break;
         }
+        let frame_start = Instant::now();
+        app.last_terminal_area = guard.terminal.size()?.into();
         app.tick_feedback();
         let shell_drain = app.shell.poll_output();
         let (next_shell_output_burst_active, refresh_navigation_now) = shell_output_burst_update(
@@ -769,12 +852,62 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
         );
         let left_fullish_layout = previous_fullish_layout && !current_fullish_layout;
         previous_fullish_layout = current_fullish_layout;
-        if !throttle_redraw && (app.force_terminal_clear || left_fullish_layout) {
-            guard.terminal.clear()?;
-            app.force_terminal_clear = false;
+        // Forward graphics transmissions (kitty) to the host FIRST so the image
+        // is loaded when the placeholder cells place it. This runs every
+        // iteration, independent of the redraw decision below: a nested tool may
+        // (re)transmit pixels without touching the text grid, and skipping the
+        // composited frame must not drop the image. Placement rides the U=1
+        // placeholder cells in the text grid; shell and preview pass graphics
+        // through verbatim, 1:1 with a bare terminal.
+        let shell_graphics = wrap_graphics_passthrough(&app.shell.take_graphics_passthrough());
+        let preview_graphics = if app.preview_command_overlay_active {
+            app.preview_command_shell
+                .as_mut()
+                .map(|session| wrap_graphics_passthrough(&session.take_graphics_passthrough()))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let graphics_pending = !shell_graphics.is_empty() || !preview_graphics.is_empty();
+        if !shell_graphics.is_empty() {
+            app.shell.log_graphics_forward(shell_graphics.len(), 0);
+            gfx_writer.send(shell_graphics);
+        }
+        if !preview_graphics.is_empty() {
+            if let Some(session) = app.preview_command_shell.as_mut() {
+                session.log_graphics_forward(preview_graphics.len(), 0);
+            }
+            gfx_writer.send(preview_graphics);
         }
 
-        if !throttle_redraw {
+        // Dirty-skip: the double-loop used to rebuild the whole ratatui buffer
+        // every iteration. Rebuild only when a render input actually changed so
+        // an idle (or graphics-only) child no longer starves input handling —
+        // that wasted per-frame work is what made scrolling, and `Ctrl+C`
+        // mid-scroll, feel laggy.
+        let needs_redraw = should_composited_redraw(
+            drain.screen_changed,
+            force_draw_next_iteration,
+            app.force_terminal_clear,
+            left_fullish_layout,
+            refresh_navigation_now,
+            graphics_pending,
+        );
+        let want_draw = !throttle_redraw && needs_redraw;
+        // A graphics transfer in flight owns the host until it drains; painting
+        // now would splice frame escapes into the image and corrupt it. Re-arm
+        // the draw for a later tick instead — the writer finishing also means
+        // the image is loaded before the placeholder cells that place it.
+        let defer_for_graphics = defer_repaint_for_graphics(want_draw, gfx_writer.is_busy());
+        if defer_for_graphics {
+            force_draw_next_iteration = true;
+        }
+        if want_draw && !defer_for_graphics {
+            if app.force_terminal_clear || left_fullish_layout {
+                guard.terminal.clear()?;
+                app.force_terminal_clear = false;
+            }
+
             guard.terminal.draw(|frame| {
                 let size = frame.area();
                 let auto_fullish = app.active == ActivePane::Shell && app.shell.in_alt_screen();
@@ -788,6 +921,13 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                     || app.help_open
                     || preview_overlay_interactive;
                 let footer_dim_theme = fullish_shell_theme || preview_overlay_interactive;
+                let shell_graphics_active = app.shell.has_active_graphics();
+                let preview_graphics_active = app
+                    .preview_command_shell
+                    .as_ref()
+                    .is_some_and(ShellPane::has_active_graphics);
+                let main_graphics_active =
+                    shell_graphics_active || (preview_overlay_active && preview_graphics_active);
                 let frame_rows = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -795,7 +935,9 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                 let main_area = frame_rows[0];
                 let footer_area = frame_rows[1];
                 // Full-frame clear prevents stale glyph bleed across dynamic layout changes.
-                frame.render_widget(Clear, main_area);
+                if !main_graphics_active {
+                    frame.render_widget(Clear, main_area);
+                }
                 frame.render_widget(Clear, footer_area);
                 let shell_height =
                     shell_panel_height(main_area.height, app.active, shell_fullish_mode);
@@ -875,8 +1017,12 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                 let shell_lines_plain = text_lines_plain(&shell_text);
 
                 frame.render_widget(Clear, cols[0]);
-                frame.render_widget(Clear, cols[1]);
-                frame.render_widget(Clear, shell_block_area);
+                if !(preview_overlay_active && preview_graphics_active) {
+                    frame.render_widget(Clear, cols[1]);
+                }
+                if !shell_graphics_active {
+                    frame.render_widget(Clear, shell_block_area);
+                }
                 frame.render_widget(nav_block, cols[0]);
                 frame.render_widget(preview_block, cols[1]);
                 frame.render_widget(shell_block, shell_block_area);
@@ -928,7 +1074,9 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                 let preview_inner = inner(cols[1]);
                 let mut preview_lines_plain = Vec::new();
                 let preview_metrics = if preview_overlay_active {
-                    frame.render_widget(Clear, cols[1]);
+                    if !preview_graphics_active {
+                        frame.render_widget(Clear, cols[1]);
+                    }
                     let overlay_preview_block = Block::default()
                         .title(Line::from(vec![
                             Span::styled("─", preview_border),
@@ -948,7 +1096,9 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                         );
                         preview_lines_plain = text_lines_plain(&preview_shell_text);
                         // Avoid stale edge glyphs while terminal app redraws.
-                        frame.render_widget(Clear, preview_inner);
+                        if !preview_graphics_active {
+                            frame.render_widget(Clear, preview_inner);
+                        }
                         frame.render_widget(Paragraph::new(preview_shell_text), preview_inner);
                         if let Some((cursor_row, cursor_col)) = session
                             .visible_cursor(preview_inner.height.max(1), preview_inner.width.max(1))
@@ -1343,1031 +1493,1136 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
             force_draw_next_iteration = false;
         }
 
-        let input_poll_timeout = poll_timeout_for_drain(drain);
+        // iTerm2's positioned reflush is also a host write. It is drained only
+        // while the writer is idle (so a kitty transfer in flight finishes
+        // first and the next repaint defers until the image lands), then routed
+        // through the SAME off-thread graphics writer as kitty instead of an
+        // inline `backend.write_all`. Inline, a multi-MB inline image froze the
+        // loop exactly like the kitty case did; off-thread keeps input
+        // responsive. Protocol- and tool-independent — no per-app handling.
+        // NOTE: exercised only against the kitty path in this dev env
+        // (Linux/Ghostty); the iTerm2 reflush routing is unverified on a real
+        // iTerm2 terminal and should be confirmed on macOS/iTerm2.
+        if should_flush_positioned_graphics(gfx_writer.is_busy()) {
+            let mut graphics_frame_bytes = Vec::new();
+            graphics_frame_bytes.extend(app.shell.drain_graphics_frame_bytes(
+                app.render_snapshot.shell_inner,
+                app.active == ActivePane::Shell,
+            ));
+            if app.preview_command_overlay_active
+                && let Some(session) = app.preview_command_shell.as_mut()
+            {
+                graphics_frame_bytes.extend(session.drain_graphics_frame_bytes(
+                    app.render_snapshot.preview_inner,
+                    app.active == ActivePane::Preview,
+                ));
+            }
+            // Empty blobs are dropped by the writer, so they never mark it busy.
+            gfx_writer.send(graphics_frame_bytes);
+        }
+
+        // While output is actively flowing, hold the remaining frame budget so
+        // the loop runs at ~30fps instead of spinning. `event::poll` returns as
+        // soon as input arrives, so this never adds keystroke latency; it only
+        // paces redundant re-renders and lets PTY backpressure throttle a child
+        // that floods faster than we can forward (e.g. a tool re-uploading a
+        // multi-MB image): the PTY buffer fills and the child blocks on write
+        // instead of us spinning at 0ms and flooding the host. This deliberately
+        // also covers the `hit_limit` case — catching up by spinning is what
+        // saturated the CPU and the host terminal. Idle (no output) keeps the
+        // longer poll via `poll_timeout_for_drain`.
+        let input_poll_timeout = if drain.processed_chunks > 0 {
+            frame_interval.saturating_sub(frame_start.elapsed())
+        } else {
+            poll_timeout_for_drain(drain)
+        };
         if !event::poll(input_poll_timeout)? {
             continue;
         }
-        let event = event::read()?;
-        force_draw_next_iteration = true;
-        if let Event::Mouse(mouse) = event {
-            // Mouse interaction always cancels pending Esc-prefix state.
-            app.pending_alt = false;
-            app.pending_alt_shortcut_armed = false;
-            app.nav_pending_file_shortcut = None;
-            let terminal_area: Rect = guard.terminal.size()?.into();
-            if app.config_open || app.help_open {
-                let overlay = if app.config_open {
-                    centered_rect(78, 70, terminal_area)
-                } else {
-                    centered_rect(72, 66, terminal_area)
-                };
-                let overlay_inner = inner(overlay);
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        if overlay_inner.width > 0
-                            && overlay_inner.height > 0
-                            && point_in_rect(mouse.column, mouse.row, overlay_inner)
-                        {
-                            let start = clamp_point_to_rect(mouse.column, mouse.row, overlay_inner);
-                            app.mouse_selection = Some(PanelSelection {
-                                pane: ActivePane::Preview,
-                                start,
-                                end: start,
-                                dragged: false,
-                            });
-                        } else {
-                            app.mouse_selection = None;
+        // Batch-drain all buffered input before re-rendering. Feeding one key per
+        // render cycle makes the child repaint (and re-emit its image) once per
+        // key; under a held scroll key the events queue faster than we consume
+        // them, lagging the scroll and pushing the exit key behind the backlog.
+        // Draining the burst lets the child coalesce it into a single repaint —
+        // a protocol-independent fix that also curbs image re-emit floods.
+        let mut batched_input = 0usize;
+        'input: loop {
+            // Decide at the TOP whether to read another event, so a `continue`
+            // from the handler below returns here instead of blocking on
+            // `event::read()`. The first event is already known to be buffered
+            // (polled just above); for later iterations read only while crossterm
+            // still has one queued, otherwise stop the batch and re-render.
+            let more_buffered = batched_input == 0 || event::poll(Duration::ZERO)?;
+            if should_stop_input_batch(batched_input, more_buffered, MAX_INPUT_BATCH_PER_TICK) {
+                break 'input;
+            }
+            let event = event::read()?;
+            batched_input = batched_input.saturating_add(1);
+            force_draw_next_iteration = true;
+            if let Event::Mouse(mouse) = event {
+                // Mouse interaction always cancels pending Esc-prefix state.
+                app.pending_alt = false;
+                app.pending_alt_shortcut_armed = false;
+                app.nav_pending_file_shortcut = None;
+                let terminal_area: Rect = guard.terminal.size()?.into();
+                if app.config_open || app.help_open {
+                    let overlay = if app.config_open {
+                        centered_rect(78, 70, terminal_area)
+                    } else {
+                        centered_rect(72, 66, terminal_area)
+                    };
+                    let overlay_inner = inner(overlay);
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if overlay_inner.width > 0
+                                && overlay_inner.height > 0
+                                && point_in_rect(mouse.column, mouse.row, overlay_inner)
+                            {
+                                let start =
+                                    clamp_point_to_rect(mouse.column, mouse.row, overlay_inner);
+                                app.mouse_selection = Some(PanelSelection {
+                                    pane: ActivePane::Preview,
+                                    start,
+                                    end: start,
+                                    dragged: false,
+                                });
+                            } else {
+                                app.mouse_selection = None;
+                            }
+                        },
+                        MouseEventKind::Drag(MouseButton::Left)
+                        | MouseEventKind::Up(MouseButton::Left) => {
+                            if let Some(selection) = app.mouse_selection.as_mut()
+                                && selection.pane == ActivePane::Preview
+                                && overlay_inner.width > 0
+                                && overlay_inner.height > 0
+                            {
+                                let point =
+                                    clamp_point_to_rect(mouse.column, mouse.row, overlay_inner);
+                                selection.end = point;
+                                if point != selection.start {
+                                    selection.dragged = true;
+                                }
+                            }
+                        },
+                        _ => {},
+                    }
+                    if app.help_open {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                app.help_scroll = app.help_scroll.saturating_sub(3);
+                            },
+                            MouseEventKind::ScrollDown => {
+                                app.help_scroll = app.help_scroll.saturating_add(3);
+                            },
+                            _ => {},
                         }
-                    },
+                    }
+                    continue;
+                }
+                let (nav_area, preview_area, shell_area) = panel_areas_for_focus_click(
+                    terminal_area,
+                    app.active,
+                    app.shell_fullish,
+                    app.shell.in_alt_screen(),
+                    app.nav_fullish,
+                    app.preview_command_overlay_active,
+                );
+                if child_mouse_mode {
+                    if app.active == ActivePane::Shell
+                        && app.shell.in_alt_screen()
+                        && let Some(local_mouse) =
+                            mouse_event_relative_to_panel(mouse, inner(shell_area))
+                    {
+                        app.shell.send_mouse(local_mouse)?;
+                        continue;
+                    }
+                    if app.active == ActivePane::Preview
+                        && app.preview_command_overlay_active
+                        && preview_overlay_is_interactive(app.preview_command_overlay_presentation)
+                        && let Some(local_mouse) =
+                            mouse_event_relative_to_panel(mouse, inner(preview_area))
+                        && let Some(session) = app.preview_command_shell.as_mut()
+                    {
+                        session.send_mouse(local_mouse)?;
+                        continue;
+                    }
+                }
+                if app.active == ActivePane::Preview
+                    && app.preview_command_overlay_active
+                    && !preview_overlay_is_interactive(app.preview_command_overlay_presentation)
+                    && app.preview_command_overlay_mode == Some(PreviewCommandMode::Read)
+                {
+                    if let Some(session) = app.preview_command_shell.as_mut() {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                session.scroll_up(PREVIEW_MOUSE_SCROLL_STEP_ROWS);
+                            },
+                            MouseEventKind::ScrollDown => {
+                                session.scroll_down(PREVIEW_MOUSE_SCROLL_STEP_ROWS);
+                            },
+                            _ => {},
+                        }
+                    }
+                    continue;
+                }
+                if !options.navix_mouse_capture {
+                    continue;
+                }
+                match mouse.kind {
                     MouseEventKind::Drag(MouseButton::Left)
                     | MouseEventKind::Up(MouseButton::Left) => {
-                        if let Some(selection) = app.mouse_selection.as_mut()
-                            && selection.pane == ActivePane::Preview
-                            && overlay_inner.width > 0
-                            && overlay_inner.height > 0
-                        {
-                            let point = clamp_point_to_rect(mouse.column, mouse.row, overlay_inner);
-                            selection.end = point;
-                            if point != selection.start {
-                                selection.dragged = true;
+                        if let Some(selection) = app.mouse_selection.as_mut() {
+                            let panel_inner = pane_inner_from_areas(
+                                selection.pane,
+                                nav_area,
+                                preview_area,
+                                shell_area,
+                            );
+                            if panel_inner.width > 0 && panel_inner.height > 0 {
+                                let point =
+                                    clamp_point_to_rect(mouse.column, mouse.row, panel_inner);
+                                selection.end = point;
+                                if point != selection.start {
+                                    selection.dragged = true;
+                                }
                             }
                         }
+                        continue;
                     },
-                    _ => {},
+                    MouseEventKind::Down(MouseButton::Left) => {},
+                    _ => {
+                        continue;
+                    },
                 }
-                if app.help_open {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            app.help_scroll = app.help_scroll.saturating_sub(3);
+                let Some(clicked_pane) = pane_from_mouse_position(
+                    mouse.column,
+                    mouse.row,
+                    nav_area,
+                    preview_area,
+                    shell_area,
+                ) else {
+                    continue;
+                };
+                if clicked_pane == ActivePane::Preview && !app.preview_command_overlay_active {
+                    app.refresh_preview_panel();
+                }
+                let target = panel_click_focus_target(
+                    clicked_pane,
+                    app.preview_command_overlay_active,
+                    app.nav_entries.get(app.nav_selected),
+                    app.preview_mode,
+                );
+                if target != ActivePane::Preview {
+                    app.close_preview_command_overlay();
+                }
+                app.active = target;
+                let target_inner =
+                    pane_inner_from_areas(target, nav_area, preview_area, shell_area);
+                if target_inner.width > 0 && target_inner.height > 0 {
+                    let start = clamp_point_to_rect(mouse.column, mouse.row, target_inner);
+                    app.mouse_selection = Some(PanelSelection {
+                        pane: target,
+                        start,
+                        end: start,
+                        dragged: false,
+                    });
+                } else {
+                    app.mouse_selection = None;
+                }
+                if clicked_pane != ActivePane::Navigation {
+                    last_navigation_click = None;
+                    continue;
+                }
+                let nav_inner = inner(nav_area);
+                let nav_entry_viewport_rows = nav_inner.height.saturating_sub(2) as usize;
+                let (window_start, window_end, _, _, _, _, _) = nav_window_metrics(
+                    app.nav_entries.len(),
+                    nav_entry_viewport_rows,
+                    app.nav_scroll,
+                );
+                let first_entry_y = nav_inner.y.saturating_add(1);
+                if mouse.row < first_entry_y {
+                    last_navigation_click = None;
+                    continue;
+                }
+                let line_idx = mouse.row.saturating_sub(first_entry_y) as usize;
+                let clicked_index = window_start.saturating_add(line_idx);
+                if clicked_index >= window_end {
+                    last_navigation_click = None;
+                    continue;
+                }
+                app.nav_selected = clicked_index;
+                app.nav_scroll = nav_scroll_for_selection(
+                    app.nav_scroll,
+                    app.nav_selected,
+                    app.nav_entries.len(),
+                    app.nav_viewport_rows,
+                );
+                let now = Instant::now();
+                let is_double_click = last_navigation_click.is_some_and(|(idx, at)| {
+                    idx == clicked_index && now.duration_since(at) <= Duration::from_millis(350)
+                });
+                if is_double_click {
+                    if let Some(entry) = app.nav_entries.get(app.nav_selected) {
+                        if entry.is_dir {
+                            app.nav_filter.clear();
+                            app.shell.cd_to(&entry.path, app.shell_pending_input)?;
+                            app.nav_loaded = false;
+                            app.nav_selected = 0;
+                            app.nav_scroll = 0;
+                        } else {
+                            let _ = run_selected_file_command_shortcut(&mut app, 'r')?;
+                        }
+                    }
+                    last_navigation_click = None;
+                } else {
+                    last_navigation_click = Some((clicked_index, now));
+                }
+                continue;
+            }
+            let Event::Key(key) = event else {
+                continue;
+            };
+            app.log_key_debug_event("recv", Some(&key));
+            let (next_pending_alt, next_pending_alt_shortcut_armed, consumed_by_release) =
+                escape_prefix_release_update(
+                    app.pending_alt,
+                    app.pending_alt_shortcut_armed,
+                    key.code,
+                    key.kind,
+                );
+            app.pending_alt = next_pending_alt;
+            app.pending_alt_shortcut_armed = next_pending_alt_shortcut_armed;
+            app.log_key_debug_event("after_release_update", Some(&key));
+            if consumed_by_release {
+                app.log_key_debug_event("consumed_release", Some(&key));
+                continue;
+            }
+            if app.active == ActivePane::Navigation
+                && key.code == KeyCode::Backspace
+                && key.kind == KeyEventKind::Release
+            {
+                app.nav_backspace_parent_ready = true;
+                continue;
+            }
+            if app.active == ActivePane::Navigation
+                && let Some(committed_char) = navigation_pending_shortcut_to_filter_char_on_release(
+                    app.nav_pending_file_shortcut,
+                    key.code,
+                    key.kind,
+                )
+            {
+                if app.nav_filter_char_held == Some(committed_char) {
+                    app.nav_filter_char_held = None;
+                }
+                app.nav_pending_file_shortcut = None;
+                app.append_navigation_filter_char(committed_char);
+                continue;
+            }
+            if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
+                app.log_key_debug_event("ignored_non_press_repeat", Some(&key));
+                continue;
+            }
+            let copy_shortcut =
+                copy_selection_shortcut(key.code, key.modifiers, command_copy_enabled);
+            let preview_ctrl_c_copy = app.active == ActivePane::Preview
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && !key.modifiers.contains(KeyModifiers::SUPER)
+                && matches!(key.code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'c'))
+                && app
+                    .mouse_selection
+                    .is_some_and(|selection| selection.dragged);
+            if copy_shortcut_debug_candidate_key(&key) {
+                log_copy_shortcut_event(
+                    &mut copy_key_debug_log,
+                    &mut copy_key_debug_seq,
+                    "copy_probe",
+                    &key,
+                    copy_shortcut,
+                    preview_ctrl_c_copy,
+                    app.mouse_selection
+                        .is_some_and(|selection| selection.dragged),
+                );
+            }
+            let clear_mouse_selection =
+                should_clear_mouse_selection_for_key(key.code, copy_shortcut, preview_ctrl_c_copy);
+            if copy_shortcut || preview_ctrl_c_copy {
+                if let Some(selection) = app.mouse_selection.filter(|selection| selection.dragged) {
+                    let selected_text =
+                        selected_text_from_snapshot(selection, &app.render_snapshot);
+                    copy_text_to_clipboard(&selected_text)?;
+                    log_copy_shortcut_event(
+                        &mut copy_key_debug_log,
+                        &mut copy_key_debug_seq,
+                        "copy_committed",
+                        &key,
+                        copy_shortcut,
+                        preview_ctrl_c_copy,
+                        true,
+                    );
+                    app.mouse_selection = None;
+                    continue;
+                }
+            } else if clear_mouse_selection {
+                app.mouse_selection = None;
+            }
+            if app.active != ActivePane::Navigation {
+                app.nav_pending_file_shortcut = None;
+                app.nav_backspace_parent_ready = true;
+                app.nav_filter_char_held = None;
+            }
+
+            if app.config_open {
+                app.nav_pending_file_shortcut = None;
+                if app.config_editor.editing {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.config_editor.editing = false;
+                            app.config_editor.clear_input();
+                            app.config_editor.status_message = "edit canceled".to_string();
+                            continue;
                         },
-                        MouseEventKind::ScrollDown => {
-                            app.help_scroll = app.help_scroll.saturating_add(3);
+                        KeyCode::Enter => {
+                            if app.config_editor.selected_field == ConfigField::Extension {
+                                if let Some(error_message) = extension_validation_error_for_rule(
+                                    &app.config_state,
+                                    app.config_editor.selected_rule,
+                                    &app.config_editor.input_buffer,
+                                ) {
+                                    app.config_editor.status_message = error_message;
+                                    continue;
+                                }
+                            }
+                            if let Some(rule) = app
+                                .config_state
+                                .extension_rules
+                                .get_mut(app.config_editor.selected_rule)
+                            {
+                                let value = app.config_editor.input_buffer.clone();
+                                set_config_field(rule, app.config_editor.selected_field, &value);
+                                app.config_editor.dirty = true;
+                                app.config_editor.status_message =
+                                    format!("updated {}", app.config_editor.selected_field.label());
+                            }
+                            app.config_editor.editing = false;
+                            app.config_editor.clear_input();
+                            continue;
+                        },
+                        KeyCode::Backspace => {
+                            app.config_editor.backspace();
+                            continue;
+                        },
+                        KeyCode::Delete => {
+                            app.config_editor.delete();
+                            continue;
+                        },
+                        KeyCode::Left => {
+                            app.config_editor.move_cursor_left();
+                            continue;
+                        },
+                        KeyCode::Right => {
+                            app.config_editor.move_cursor_right();
+                            continue;
+                        },
+                        KeyCode::Home => {
+                            app.config_editor.move_cursor_home();
+                            continue;
+                        },
+                        KeyCode::End => {
+                            app.config_editor.move_cursor_end();
+                            continue;
+                        },
+                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.config_editor.move_cursor_home();
+                            continue;
+                        },
+                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.config_editor.move_cursor_end();
+                            continue;
+                        },
+                        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.config_editor.insert_char(ch);
+                            continue;
+                        },
+                        _ => continue,
+                    }
+                }
+
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match key.code {
+                        KeyCode::Char('s') => {
+                            app.save_config();
+                            continue;
+                        },
+                        KeyCode::Char('r') => {
+                            app.reload_config();
+                            continue;
+                        },
+                        KeyCode::Char('d') => {
+                            app.discard_config_changes();
+                            continue;
+                        },
+                        KeyCode::Char('n') => {
+                            let extension = next_available_extension_name(&app.config_state, "new");
+                            app.config_state
+                                .extension_rules
+                                .push(default_extension_rule(&extension));
+                            app.config_editor.selected_rule =
+                                app.config_state.extension_rules.len().saturating_sub(1);
+                            app.config_editor.selected_field = ConfigField::Extension;
+                            if let Some(rule) = app
+                                .config_state
+                                .extension_rules
+                                .get(app.config_editor.selected_rule)
+                            {
+                                app.config_editor.set_input(rule.extension.clone());
+                                app.config_editor.editing = true;
+                            }
+                            app.config_editor.dirty = true;
+                            app.config_editor.status_message.clear();
+                            continue;
+                        },
+                        KeyCode::Delete => {
+                            app.delete_selected_extension_rule();
+                            continue;
+                        },
+                        KeyCode::Backspace => {
+                            app.delete_selected_extension_rule();
+                            continue;
+                        },
+                        // Some terminals report Ctrl+Backspace as Ctrl+h.
+                        KeyCode::Char('h') => {
+                            app.delete_selected_extension_rule();
+                            continue;
                         },
                         _ => {},
                     }
                 }
-                continue;
-            }
-            let (nav_area, preview_area, shell_area) = panel_areas_for_focus_click(
-                terminal_area,
-                app.active,
-                app.shell_fullish,
-                app.shell.in_alt_screen(),
-                app.nav_fullish,
-                app.preview_command_overlay_active,
-            );
-            if child_mouse_mode {
-                if app.active == ActivePane::Shell
-                    && app.shell.in_alt_screen()
-                    && let Some(local_mouse) =
-                        mouse_event_relative_to_panel(mouse, inner(shell_area))
-                {
-                    app.shell.send_mouse(local_mouse)?;
-                    continue;
-                }
-                if app.active == ActivePane::Preview
-                    && app.preview_command_overlay_active
-                    && preview_overlay_is_interactive(app.preview_command_overlay_presentation)
-                    && let Some(local_mouse) =
-                        mouse_event_relative_to_panel(mouse, inner(preview_area))
-                    && let Some(session) = app.preview_command_shell.as_mut()
-                {
-                    session.send_mouse(local_mouse)?;
-                    continue;
-                }
-            }
-            if !options.navix_mouse_capture {
-                continue;
-            }
-            match mouse.kind {
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-                    if let Some(selection) = app.mouse_selection.as_mut() {
-                        let panel_inner = pane_inner_from_areas(
-                            selection.pane,
-                            nav_area,
-                            preview_area,
-                            shell_area,
-                        );
-                        if panel_inner.width > 0 && panel_inner.height > 0 {
-                            let point = clamp_point_to_rect(mouse.column, mouse.row, panel_inner);
-                            selection.end = point;
-                            if point != selection.start {
-                                selection.dragged = true;
-                            }
-                        }
-                    }
-                    continue;
-                },
-                MouseEventKind::Down(MouseButton::Left) => {},
-                _ => {
-                    continue;
-                },
-            }
-            let Some(clicked_pane) = pane_from_mouse_position(
-                mouse.column,
-                mouse.row,
-                nav_area,
-                preview_area,
-                shell_area,
-            ) else {
-                continue;
-            };
-            if clicked_pane == ActivePane::Preview && !app.preview_command_overlay_active {
-                app.refresh_preview_panel();
-            }
-            let target = panel_click_focus_target(
-                clicked_pane,
-                app.preview_command_overlay_active,
-                app.nav_entries.get(app.nav_selected),
-                app.preview_mode,
-            );
-            if target != ActivePane::Preview {
-                app.close_preview_command_overlay();
-            }
-            app.active = target;
-            let target_inner = pane_inner_from_areas(target, nav_area, preview_area, shell_area);
-            if target_inner.width > 0 && target_inner.height > 0 {
-                let start = clamp_point_to_rect(mouse.column, mouse.row, target_inner);
-                app.mouse_selection = Some(PanelSelection {
-                    pane: target,
-                    start,
-                    end: start,
-                    dragged: false,
-                });
-            } else {
-                app.mouse_selection = None;
-            }
-            if clicked_pane != ActivePane::Navigation {
-                last_navigation_click = None;
-                continue;
-            }
-            let nav_inner = inner(nav_area);
-            let nav_entry_viewport_rows = nav_inner.height.saturating_sub(2) as usize;
-            let (window_start, window_end, _, _, _, _, _) = nav_window_metrics(
-                app.nav_entries.len(),
-                nav_entry_viewport_rows,
-                app.nav_scroll,
-            );
-            let first_entry_y = nav_inner.y.saturating_add(1);
-            if mouse.row < first_entry_y {
-                last_navigation_click = None;
-                continue;
-            }
-            let line_idx = mouse.row.saturating_sub(first_entry_y) as usize;
-            let clicked_index = window_start.saturating_add(line_idx);
-            if clicked_index >= window_end {
-                last_navigation_click = None;
-                continue;
-            }
-            app.nav_selected = clicked_index;
-            app.nav_scroll = nav_scroll_for_selection(
-                app.nav_scroll,
-                app.nav_selected,
-                app.nav_entries.len(),
-                app.nav_viewport_rows,
-            );
-            let now = Instant::now();
-            let is_double_click = last_navigation_click.is_some_and(|(idx, at)| {
-                idx == clicked_index && now.duration_since(at) <= Duration::from_millis(350)
-            });
-            if is_double_click {
-                if let Some(entry) = app.nav_entries.get(app.nav_selected) {
-                    if entry.is_dir {
-                        app.nav_filter.clear();
-                        app.shell.cd_to(&entry.path, app.shell_pending_input)?;
-                        app.nav_loaded = false;
-                        app.nav_selected = 0;
-                        app.nav_scroll = 0;
-                    } else {
-                        let _ = run_selected_file_command_shortcut(&mut app, 'r')?;
-                    }
-                }
-                last_navigation_click = None;
-            } else {
-                last_navigation_click = Some((clicked_index, now));
-            }
-            continue;
-        }
-        let Event::Key(key) = event else {
-            continue;
-        };
-        app.log_key_debug_event("recv", Some(&key));
-        let (next_pending_alt, next_pending_alt_shortcut_armed, consumed_by_release) =
-            escape_prefix_release_update(
-                app.pending_alt,
-                app.pending_alt_shortcut_armed,
-                key.code,
-                key.kind,
-            );
-        app.pending_alt = next_pending_alt;
-        app.pending_alt_shortcut_armed = next_pending_alt_shortcut_armed;
-        app.log_key_debug_event("after_release_update", Some(&key));
-        if consumed_by_release {
-            app.log_key_debug_event("consumed_release", Some(&key));
-            continue;
-        }
-        if app.active == ActivePane::Navigation
-            && key.code == KeyCode::Backspace
-            && key.kind == KeyEventKind::Release
-        {
-            app.nav_backspace_parent_ready = true;
-            continue;
-        }
-        if app.active == ActivePane::Navigation
-            && let Some(committed_char) = navigation_pending_shortcut_to_filter_char_on_release(
-                app.nav_pending_file_shortcut,
-                key.code,
-                key.kind,
-            )
-        {
-            if app.nav_filter_char_held == Some(committed_char) {
-                app.nav_filter_char_held = None;
-            }
-            app.nav_pending_file_shortcut = None;
-            app.append_navigation_filter_char(committed_char);
-            continue;
-        }
-        if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
-            app.log_key_debug_event("ignored_non_press_repeat", Some(&key));
-            continue;
-        }
-        let copy_shortcut = copy_selection_shortcut(key.code, key.modifiers, command_copy_enabled);
-        let preview_ctrl_c_copy = app.active == ActivePane::Preview
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.contains(KeyModifiers::ALT)
-            && !key.modifiers.contains(KeyModifiers::SUPER)
-            && matches!(key.code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'c'))
-            && app
-                .mouse_selection
-                .is_some_and(|selection| selection.dragged);
-        if copy_shortcut_debug_candidate_key(&key) {
-            log_copy_shortcut_event(
-                &mut copy_key_debug_log,
-                &mut copy_key_debug_seq,
-                "copy_probe",
-                &key,
-                copy_shortcut,
-                preview_ctrl_c_copy,
-                app.mouse_selection
-                    .is_some_and(|selection| selection.dragged),
-            );
-        }
-        let clear_mouse_selection =
-            should_clear_mouse_selection_for_key(key.code, copy_shortcut, preview_ctrl_c_copy);
-        if copy_shortcut || preview_ctrl_c_copy {
-            if let Some(selection) = app.mouse_selection.filter(|selection| selection.dragged) {
-                let selected_text = selected_text_from_snapshot(selection, &app.render_snapshot);
-                copy_text_to_clipboard(&selected_text)?;
-                log_copy_shortcut_event(
-                    &mut copy_key_debug_log,
-                    &mut copy_key_debug_seq,
-                    "copy_committed",
-                    &key,
-                    copy_shortcut,
-                    preview_ctrl_c_copy,
-                    true,
-                );
-                app.mouse_selection = None;
-                continue;
-            }
-        } else if clear_mouse_selection {
-            app.mouse_selection = None;
-        }
-        if app.active != ActivePane::Navigation {
-            app.nav_pending_file_shortcut = None;
-            app.nav_backspace_parent_ready = true;
-            app.nav_filter_char_held = None;
-        }
 
-        if app.config_open {
-            app.nav_pending_file_shortcut = None;
-            if app.config_editor.editing {
                 match key.code {
                     KeyCode::Esc => {
+                        app.config_open = false;
                         app.config_editor.editing = false;
                         app.config_editor.clear_input();
-                        app.config_editor.status_message = "edit canceled".to_string();
+                        app.pending_alt = false;
+                        app.pending_alt_shortcut_armed = false;
                         continue;
                     },
-                    KeyCode::Enter => {
-                        if app.config_editor.selected_field == ConfigField::Extension {
-                            if let Some(error_message) = extension_validation_error_for_rule(
-                                &app.config_state,
-                                app.config_editor.selected_rule,
-                                &app.config_editor.input_buffer,
-                            ) {
-                                app.config_editor.status_message = error_message;
-                                continue;
-                            }
+                    KeyCode::Up if key.modifiers.is_empty() => {
+                        app.config_editor.selected_rule =
+                            app.config_editor.selected_rule.saturating_sub(1);
+                        app.config_editor.ensure_valid(&app.config_state);
+                        continue;
+                    },
+                    KeyCode::Down if key.modifiers.is_empty() => {
+                        if app.config_editor.selected_rule + 1
+                            < app.config_state.extension_rules.len()
+                        {
+                            app.config_editor.selected_rule += 1;
+                        }
+                        app.config_editor.ensure_valid(&app.config_state);
+                        continue;
+                    },
+                    KeyCode::Left if key.modifiers.is_empty() => {
+                        app.config_editor.selected_field = app.config_editor.selected_field.prev();
+                        continue;
+                    },
+                    KeyCode::Right if key.modifiers.is_empty() => {
+                        app.config_editor.selected_field = app.config_editor.selected_field.next();
+                        continue;
+                    },
+                    KeyCode::Enter if key.modifiers.is_empty() => {
+                        if app.config_state.extension_rules.is_empty() {
+                            let extension = next_available_extension_name(&app.config_state, "new");
+                            app.config_state
+                                .extension_rules
+                                .push(default_extension_rule(&extension));
+                            app.config_editor.selected_rule = 0;
+                            app.config_editor.selected_field = ConfigField::Extension;
                         }
                         if let Some(rule) = app
                             .config_state
                             .extension_rules
-                            .get_mut(app.config_editor.selected_rule)
+                            .get(app.config_editor.selected_rule)
                         {
-                            let value = app.config_editor.input_buffer.clone();
-                            set_config_field(rule, app.config_editor.selected_field, &value);
-                            app.config_editor.dirty = true;
-                            app.config_editor.status_message =
-                                format!("updated {}", app.config_editor.selected_field.label());
+                            app.config_editor.set_input(
+                                config_field_value(rule, app.config_editor.selected_field)
+                                    .to_string(),
+                            );
+                            app.config_editor.editing = true;
                         }
-                        app.config_editor.editing = false;
-                        app.config_editor.clear_input();
-                        continue;
-                    },
-                    KeyCode::Backspace => {
-                        app.config_editor.backspace();
-                        continue;
-                    },
-                    KeyCode::Delete => {
-                        app.config_editor.delete();
-                        continue;
-                    },
-                    KeyCode::Left => {
-                        app.config_editor.move_cursor_left();
-                        continue;
-                    },
-                    KeyCode::Right => {
-                        app.config_editor.move_cursor_right();
-                        continue;
-                    },
-                    KeyCode::Home => {
-                        app.config_editor.move_cursor_home();
-                        continue;
-                    },
-                    KeyCode::End => {
-                        app.config_editor.move_cursor_end();
-                        continue;
-                    },
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.config_editor.move_cursor_home();
-                        continue;
-                    },
-                    KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.config_editor.move_cursor_end();
-                        continue;
-                    },
-                    KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.config_editor.insert_char(ch);
                         continue;
                     },
                     _ => continue,
                 }
             }
 
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                match key.code {
-                    KeyCode::Char('s') => {
-                        app.save_config();
-                        continue;
-                    },
-                    KeyCode::Char('r') => {
-                        app.reload_config();
-                        continue;
-                    },
-                    KeyCode::Char('d') => {
-                        app.discard_config_changes();
-                        continue;
-                    },
-                    KeyCode::Char('n') => {
-                        let extension = next_available_extension_name(&app.config_state, "new");
-                        app.config_state
-                            .extension_rules
-                            .push(default_extension_rule(&extension));
-                        app.config_editor.selected_rule =
-                            app.config_state.extension_rules.len().saturating_sub(1);
-                        app.config_editor.selected_field = ConfigField::Extension;
-                        if let Some(rule) = app
-                            .config_state
-                            .extension_rules
-                            .get(app.config_editor.selected_rule)
-                        {
-                            app.config_editor.set_input(rule.extension.clone());
-                            app.config_editor.editing = true;
-                        }
-                        app.config_editor.dirty = true;
-                        app.config_editor.status_message.clear();
-                        continue;
-                    },
-                    KeyCode::Delete => {
-                        app.delete_selected_extension_rule();
-                        continue;
-                    },
-                    KeyCode::Backspace => {
-                        app.delete_selected_extension_rule();
-                        continue;
-                    },
-                    // Some terminals report Ctrl+Backspace as Ctrl+h.
-                    KeyCode::Char('h') => {
-                        app.delete_selected_extension_rule();
-                        continue;
-                    },
-                    _ => {},
-                }
-            }
-
-            match key.code {
-                KeyCode::Esc => {
-                    app.config_open = false;
-                    app.config_editor.editing = false;
-                    app.config_editor.clear_input();
-                    app.pending_alt = false;
-                    app.pending_alt_shortcut_armed = false;
-                    continue;
-                },
-                KeyCode::Up if key.modifiers.is_empty() => {
-                    app.config_editor.selected_rule =
-                        app.config_editor.selected_rule.saturating_sub(1);
-                    app.config_editor.ensure_valid(&app.config_state);
-                    continue;
-                },
-                KeyCode::Down if key.modifiers.is_empty() => {
-                    if app.config_editor.selected_rule + 1 < app.config_state.extension_rules.len()
-                    {
-                        app.config_editor.selected_rule += 1;
-                    }
-                    app.config_editor.ensure_valid(&app.config_state);
-                    continue;
-                },
-                KeyCode::Left if key.modifiers.is_empty() => {
-                    app.config_editor.selected_field = app.config_editor.selected_field.prev();
-                    continue;
-                },
-                KeyCode::Right if key.modifiers.is_empty() => {
-                    app.config_editor.selected_field = app.config_editor.selected_field.next();
-                    continue;
-                },
-                KeyCode::Enter if key.modifiers.is_empty() => {
-                    if app.config_state.extension_rules.is_empty() {
-                        let extension = next_available_extension_name(&app.config_state, "new");
-                        app.config_state
-                            .extension_rules
-                            .push(default_extension_rule(&extension));
-                        app.config_editor.selected_rule = 0;
-                        app.config_editor.selected_field = ConfigField::Extension;
-                    }
-                    if let Some(rule) = app
-                        .config_state
-                        .extension_rules
-                        .get(app.config_editor.selected_rule)
-                    {
-                        app.config_editor.set_input(
-                            config_field_value(rule, app.config_editor.selected_field).to_string(),
-                        );
-                        app.config_editor.editing = true;
-                    }
-                    continue;
-                },
-                _ => continue,
-            }
-        }
-
-        if app.help_open {
-            app.nav_pending_file_shortcut = None;
-            if escape_prefix_arm_shortcut(key.code, key.modifiers) {
-                app.close_help();
-                continue;
-            }
-            if key.modifiers.is_empty() {
-                match key.code {
-                    KeyCode::Up => {
-                        app.help_scroll = app.help_scroll.saturating_sub(1);
-                    },
-                    KeyCode::Down => {
-                        app.help_scroll = app.help_scroll.saturating_add(1);
-                    },
-                    KeyCode::PageUp => {
-                        app.help_scroll = app.help_scroll.saturating_sub(8);
-                    },
-                    KeyCode::PageDown => {
-                        app.help_scroll = app.help_scroll.saturating_add(8);
-                    },
-                    KeyCode::Home => {
-                        app.help_scroll = 0;
-                    },
-                    KeyCode::End => {
-                        app.help_scroll = u16::MAX;
-                    },
-                    _ => {},
-                }
-            }
-            continue;
-        }
-
-        if app.pending_alt {
-            app.log_key_debug_event("pending_alt_enter", Some(&key));
-            if app.active == ActivePane::Shell && !key.modifiers.contains(KeyModifiers::CONTROL) {
-                match key.code {
-                    KeyCode::Up => {
-                        app.shell.scroll_up(1);
-                        app.pending_alt = true;
-                        app.pending_alt_shortcut_armed = false;
-                        app.log_key_debug_event("pending_alt_shell_scroll_up", Some(&key));
-                        continue;
-                    },
-                    KeyCode::Down => {
-                        app.shell.scroll_down(1);
-                        app.pending_alt = true;
-                        app.pending_alt_shortcut_armed = false;
-                        app.log_key_debug_event("pending_alt_shell_scroll_down", Some(&key));
-                        continue;
-                    },
-                    _ => {},
-                }
-            }
-            let armed = app.pending_alt_shortcut_armed;
-            app.pending_alt = false;
-            app.pending_alt_shortcut_armed = false;
-            if let Some(shortcut) = escape_prefix_shortcut_char(armed, key.code, key.modifiers) {
-                match shortcut {
-                    '0' => {
-                        app.close_preview_command_overlay();
-                        app.active = ActivePane::Shell;
-                        app.log_key_debug_event("pending_alt_shortcut_0", Some(&key));
-                        continue;
-                    },
-                    '1' => {
-                        app.close_preview_command_overlay();
-                        app.active = ActivePane::Navigation;
-                        app.log_key_debug_event("pending_alt_shortcut_1", Some(&key));
-                        continue;
-                    },
-                    '2' => {
-                        app.refresh_preview_panel();
-                        app.active = ActivePane::Preview;
-                        app.log_key_debug_event("pending_alt_shortcut_2", Some(&key));
-                        continue;
-                    },
-                    'c' => {
-                        app.close_preview_command_overlay();
-                        app.open_config();
-                        app.log_key_debug_event("pending_alt_shortcut_c", Some(&key));
-                        continue;
-                    },
-                    'f' => {
-                        match app.active {
-                            ActivePane::Shell => {
-                                app.shell_fullish = !app.shell_fullish;
-                            },
-                            ActivePane::Navigation | ActivePane::Preview => {
-                                app.nav_fullish = !app.nav_fullish;
-                            },
-                        }
-                        app.log_key_debug_event("pending_alt_shortcut_f", Some(&key));
-                        continue;
-                    },
-                    '?' => {
-                        app.open_help();
-                        app.log_key_debug_event("pending_alt_shortcut_help", Some(&key));
-                        continue;
-                    },
-                    'r' | 'w' | 'x' => {
-                        if run_selected_file_command_shortcut(&mut app, shortcut)? {
-                            app.log_key_debug_event(
-                                "pending_alt_shortcut_file_command",
-                                Some(&key),
-                            );
-                            continue;
-                        }
-                        if app.active == ActivePane::Shell {
-                            app.shell.send_raw(&[0x1b])?;
-                            app.log_key_debug_event(
-                                "pending_alt_sent_literal_esc_shell_file_shortcut_fallback",
-                                Some(&key),
-                            );
-                        }
-                    },
-                    _ => {},
-                }
-            } else if app.active == ActivePane::Shell {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    app.log_key_debug_event("pending_alt_cleared_before_ctrl_shell", Some(&key));
-                } else {
-                    app.shell.send_raw(&[0x1b])?;
-                    app.log_key_debug_event("pending_alt_sent_literal_esc_shell", Some(&key));
-                }
-            } else if app.preview_command_overlay_active {
-                if let Some(session) = app.preview_command_shell.as_mut() {
-                    session.send_raw(&[0x1b])?;
-                }
-                app.log_key_debug_event("pending_alt_sent_literal_esc_preview", Some(&key));
-            }
-        }
-
-        if app.preview_command_overlay_active {
-            app.nav_pending_file_shortcut = None;
-            if app.active != ActivePane::Preview {
-                app.close_preview_command_overlay();
-                app.active = ActivePane::Navigation;
-                continue;
-            }
-            if app.preview_command_overlay_mode.is_none() {
-                app.close_preview_command_overlay();
-                app.active = ActivePane::Navigation;
-                continue;
-            }
-            if let Some(session) = app.preview_command_shell.as_mut() {
-                let interactive_presentation =
-                    preview_overlay_is_interactive(app.preview_command_overlay_presentation);
-                let pass_keys_to_child = preview_overlay_should_pass_keys_to_child(
-                    app.preview_command_overlay_presentation,
-                    session.is_running(),
-                );
-                if pass_keys_to_child {
-                    if !interactive_presentation
-                        && key.code == KeyCode::Esc
-                        && key.modifiers.is_empty()
-                    {
-                        app.close_preview_command_overlay();
-                        app.active = ActivePane::Navigation;
-                        continue;
-                    }
-                    session.send_key(key)?;
-                    continue;
-                }
-                if key.code == KeyCode::Esc && key.modifiers.is_empty() {
-                    app.close_preview_command_overlay();
-                    app.active = ActivePane::Navigation;
+            if app.help_open {
+                app.nav_pending_file_shortcut = None;
+                if escape_prefix_arm_shortcut(key.code, key.modifiers) {
+                    app.close_help();
                     continue;
                 }
                 if key.modifiers.is_empty() {
                     match key.code {
                         KeyCode::Up => {
-                            session.scroll_up(1);
+                            app.help_scroll = app.help_scroll.saturating_sub(1);
+                        },
+                        KeyCode::Down => {
+                            app.help_scroll = app.help_scroll.saturating_add(1);
+                        },
+                        KeyCode::PageUp => {
+                            app.help_scroll = app.help_scroll.saturating_sub(8);
+                        },
+                        KeyCode::PageDown => {
+                            app.help_scroll = app.help_scroll.saturating_add(8);
+                        },
+                        KeyCode::Home => {
+                            app.help_scroll = 0;
+                        },
+                        KeyCode::End => {
+                            app.help_scroll = u16::MAX;
+                        },
+                        _ => {},
+                    }
+                }
+                continue;
+            }
+
+            if app.pending_alt {
+                app.log_key_debug_event("pending_alt_enter", Some(&key));
+                if app.active == ActivePane::Shell && !key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    match key.code {
+                        KeyCode::Up => {
+                            app.shell.scroll_up(1);
+                            app.pending_alt = true;
+                            app.pending_alt_shortcut_armed = false;
+                            app.log_key_debug_event("pending_alt_shell_scroll_up", Some(&key));
                             continue;
                         },
                         KeyCode::Down => {
-                            session.scroll_down(1);
-                            continue;
-                        },
-                        KeyCode::PageUp => {
-                            session.scroll_up(session.page_rows());
-                            continue;
-                        },
-                        KeyCode::PageDown => {
-                            session.scroll_down(session.page_rows());
+                            app.shell.scroll_down(1);
+                            app.pending_alt = true;
+                            app.pending_alt_shortcut_armed = false;
+                            app.log_key_debug_event("pending_alt_shell_scroll_down", Some(&key));
                             continue;
                         },
                         _ => {},
                     }
                 }
-            }
-            continue;
-        }
-
-        if app.active == ActivePane::Shell {
-            app.nav_pending_file_shortcut = None;
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-                if app.block_exit_attempt_if_unsaved() {
-                    continue;
-                }
-                app.prepare_for_exit();
-                break;
-            }
-            match key.code {
-                KeyCode::PageUp => app.shell.scroll_up(app.shell.page_rows()),
-                KeyCode::PageDown => app.shell.scroll_down(app.shell.page_rows()),
-                KeyCode::Esc if escape_prefix_arm_shortcut(key.code, key.modifiers) => {
-                    app.pending_alt = true;
-                    app.pending_alt_shortcut_armed = true;
-                    app.log_key_debug_event("arm_escape_prefix_shell", Some(&key));
-                    continue;
-                },
-                KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
-                    app.shell.jump_to_bottom();
-                    app.shell.send_key(key)?;
-                    app.shell_pending_input = shell_pending_input_after_key(
-                        app.shell_pending_input,
-                        key.code,
-                        key.modifiers,
-                    );
-                },
-                _ => {
-                    // Match terminal behavior: any input key returns to the live prompt view.
-                    app.shell.jump_to_bottom();
-                    app.shell.send_key(key)?;
-                    app.shell_pending_input = shell_pending_input_after_key(
-                        app.shell_pending_input,
-                        key.code,
-                        key.modifiers,
-                    );
-                },
-            }
-            continue;
-        }
-
-        if escape_prefix_arm_shortcut(key.code, key.modifiers) {
-            app.pending_alt = true;
-            app.pending_alt_shortcut_armed = true;
-            app.log_key_debug_event("arm_escape_prefix_global", Some(&key));
-            continue;
-        }
-
-        if app.active == ActivePane::Preview {
-            app.nav_pending_file_shortcut = None;
-            let terminal_area: Rect = guard.terminal.size()?.into();
-            let (_, preview_area, _) = panel_areas_for_focus_click(
-                terminal_area,
-                app.active,
-                app.shell_fullish,
-                app.shell.in_alt_screen(),
-                app.nav_fullish,
-                app.preview_command_overlay_active,
-            );
-            let preview_panel_width = inner(preview_area).width;
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-                if app.block_exit_attempt_if_unsaved() {
-                    continue;
-                }
-                app.prepare_for_exit();
-                break;
-            }
-            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                app.preview_jump_clear_input();
-                continue;
-            }
-            if key.code == KeyCode::BackTab
-                || (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT)
-            {
-                app.preview_jump_tab_complete_reverse();
-                continue;
-            }
-            if key.code == KeyCode::Enter
-                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-            {
-                let keep_preview_focus = key.modifiers == KeyModifiers::SHIFT;
-                let jumped = app.preview_jump_enter_action()?;
-                if jumped && !keep_preview_focus {
-                    app.active = ActivePane::Navigation;
-                }
-                continue;
-            }
-            if key.modifiers.is_empty() {
-                match key.code {
-                    KeyCode::Tab => {
-                        app.preview_jump_tab_complete();
-                        continue;
-                    },
-                    KeyCode::Backspace | KeyCode::Delete => {
-                        app.preview_jump_backspace();
-                        continue;
-                    },
-                    KeyCode::Up => {
-                        app.preview_jump_step(-1, preview_panel_width);
-                        continue;
-                    },
-                    KeyCode::Down => {
-                        app.preview_jump_step(1, preview_panel_width);
-                        continue;
-                    },
-                    KeyCode::Left => {
-                        app.preview_jump_step_horizontal(-1, preview_panel_width);
-                        continue;
-                    },
-                    KeyCode::Right => {
-                        app.preview_jump_step_horizontal(1, preview_panel_width);
-                        continue;
-                    },
-                    KeyCode::Char(ch) => {
-                        app.preview_jump_push_char(ch);
-                        continue;
-                    },
-                    _ => {},
-                }
-            } else if key.modifiers == KeyModifiers::SHIFT
-                && let KeyCode::Char(ch) = key.code
-            {
-                app.preview_jump_push_char(ch);
-                continue;
-            }
-            continue;
-        }
-
-        if app.active == ActivePane::Navigation {
-            app.nav_selected = clamp_nav_selection(app.nav_selected, app.nav_entries.len());
-            if key.code != KeyCode::Backspace {
-                app.nav_backspace_parent_ready = true;
-            }
-            if app.nav_pending_file_shortcut.is_some() && key.code != KeyCode::Enter {
-                if navigation_should_ignore_pending_shortcut_event(
-                    app.nav_pending_file_shortcut,
-                    key.code,
-                    key.kind,
-                ) {
-                    continue;
-                }
-                if let Some(pending) = app.nav_pending_file_shortcut.take()
-                    && let Some(_) = navigation_filter_char(key.code, key.modifiers)
+                let armed = app.pending_alt_shortcut_armed;
+                app.pending_alt = false;
+                app.pending_alt_shortcut_armed = false;
+                if let Some(shortcut) = escape_prefix_shortcut_char(armed, key.code, key.modifiers)
                 {
-                    app.append_navigation_filter_char(pending);
+                    match shortcut {
+                        '0' => {
+                            app.close_preview_command_overlay();
+                            app.active = ActivePane::Shell;
+                            app.log_key_debug_event("pending_alt_shortcut_0", Some(&key));
+                            continue;
+                        },
+                        '1' => {
+                            app.close_preview_command_overlay();
+                            app.active = ActivePane::Navigation;
+                            app.log_key_debug_event("pending_alt_shortcut_1", Some(&key));
+                            continue;
+                        },
+                        '2' => {
+                            app.refresh_preview_panel();
+                            app.active = ActivePane::Preview;
+                            app.log_key_debug_event("pending_alt_shortcut_2", Some(&key));
+                            continue;
+                        },
+                        'c' => {
+                            app.close_preview_command_overlay();
+                            app.open_config();
+                            app.log_key_debug_event("pending_alt_shortcut_c", Some(&key));
+                            continue;
+                        },
+                        'f' => {
+                            match app.active {
+                                ActivePane::Shell => {
+                                    app.shell_fullish = !app.shell_fullish;
+                                },
+                                ActivePane::Navigation | ActivePane::Preview => {
+                                    app.nav_fullish = !app.nav_fullish;
+                                },
+                            }
+                            app.log_key_debug_event("pending_alt_shortcut_f", Some(&key));
+                            continue;
+                        },
+                        '?' => {
+                            app.open_help();
+                            app.log_key_debug_event("pending_alt_shortcut_help", Some(&key));
+                            continue;
+                        },
+                        'r' | 'w' | 'x' => {
+                            if run_selected_file_command_shortcut(&mut app, shortcut)? {
+                                app.log_key_debug_event(
+                                    "pending_alt_shortcut_file_command",
+                                    Some(&key),
+                                );
+                                continue;
+                            }
+                            if app.active == ActivePane::Shell {
+                                app.shell.send_raw(&[0x1b])?;
+                                app.log_key_debug_event(
+                                    "pending_alt_sent_literal_esc_shell_file_shortcut_fallback",
+                                    Some(&key),
+                                );
+                            }
+                        },
+                        _ => {},
+                    }
+                } else if app.active == ActivePane::Shell {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        app.log_key_debug_event(
+                            "pending_alt_cleared_before_ctrl_shell",
+                            Some(&key),
+                        );
+                    } else {
+                        app.shell.send_raw(&[0x1b])?;
+                        app.log_key_debug_event("pending_alt_sent_literal_esc_shell", Some(&key));
+                    }
+                } else if app.preview_command_overlay_active {
+                    if let Some(session) = app.preview_command_shell.as_mut() {
+                        session.send_raw(&[0x1b])?;
+                    }
+                    app.log_key_debug_event("pending_alt_sent_literal_esc_preview", Some(&key));
+                }
+            }
+
+            if app.preview_command_overlay_active {
+                app.nav_pending_file_shortcut = None;
+                if app.active != ActivePane::Preview {
+                    app.close_preview_command_overlay();
+                    app.active = ActivePane::Navigation;
+                    continue;
+                }
+                if app.preview_command_overlay_mode.is_none() {
+                    app.close_preview_command_overlay();
+                    app.active = ActivePane::Navigation;
+                    continue;
+                }
+                if let Some(session) = app.preview_command_shell.as_mut() {
+                    let interactive_presentation =
+                        preview_overlay_is_interactive(app.preview_command_overlay_presentation);
+                    let pass_keys_to_child = preview_overlay_should_pass_keys_to_child(
+                        app.preview_command_overlay_presentation,
+                        session.is_running(),
+                        app.preview_command_overlay_mode,
+                    );
+                    if pass_keys_to_child {
+                        if !interactive_presentation
+                            && key.code == KeyCode::Esc
+                            && key.modifiers.is_empty()
+                        {
+                            app.close_preview_command_overlay();
+                            app.active = ActivePane::Navigation;
+                            continue;
+                        }
+                        session.send_key(key)?;
+                        continue;
+                    }
+                    if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                        app.close_preview_command_overlay();
+                        app.active = ActivePane::Navigation;
+                        continue;
+                    }
+                    if key.modifiers.is_empty() {
+                        match key.code {
+                            KeyCode::Up => {
+                                session.scroll_up(1);
+                                continue;
+                            },
+                            KeyCode::Down => {
+                                session.scroll_down(1);
+                                continue;
+                            },
+                            KeyCode::PageUp => {
+                                session.scroll_up(session.page_rows());
+                                continue;
+                            },
+                            KeyCode::PageDown => {
+                                session.scroll_down(session.page_rows());
+                                continue;
+                            },
+                            _ => {},
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if app.active == ActivePane::Shell {
+                app.nav_pending_file_shortcut = None;
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+                    if app.block_exit_attempt_if_unsaved() {
+                        continue;
+                    }
+                    app.prepare_for_exit();
+                    break 'outer;
+                }
+                match key.code {
+                    KeyCode::PageUp => app.shell.scroll_up(app.shell.page_rows()),
+                    KeyCode::PageDown => app.shell.scroll_down(app.shell.page_rows()),
+                    KeyCode::Esc if escape_prefix_arm_shortcut(key.code, key.modifiers) => {
+                        app.pending_alt = true;
+                        app.pending_alt_shortcut_armed = true;
+                        app.log_key_debug_event("arm_escape_prefix_shell", Some(&key));
+                        continue;
+                    },
+                    KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                        app.shell.jump_to_bottom();
+                        app.shell.send_key(key)?;
+                        app.shell_pending_input = shell_pending_input_after_key(
+                            app.shell_pending_input,
+                            key.code,
+                            key.modifiers,
+                        );
+                    },
+                    _ => {
+                        // Match terminal behavior: any input key returns to the live prompt view.
+                        app.shell.jump_to_bottom();
+                        app.shell.send_key(key)?;
+                        app.shell_pending_input = shell_pending_input_after_key(
+                            app.shell_pending_input,
+                            key.code,
+                            key.modifiers,
+                        );
+                    },
+                }
+                continue;
+            }
+
+            if escape_prefix_arm_shortcut(key.code, key.modifiers) {
+                app.pending_alt = true;
+                app.pending_alt_shortcut_armed = true;
+                app.log_key_debug_event("arm_escape_prefix_global", Some(&key));
+                continue;
+            }
+
+            if app.active == ActivePane::Preview {
+                app.nav_pending_file_shortcut = None;
+                let terminal_area: Rect = guard.terminal.size()?.into();
+                let (_, preview_area, _) = panel_areas_for_focus_click(
+                    terminal_area,
+                    app.active,
+                    app.shell_fullish,
+                    app.shell.in_alt_screen(),
+                    app.nav_fullish,
+                    app.preview_command_overlay_active,
+                );
+                let preview_panel_width = inner(preview_area).width;
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+                    if app.block_exit_attempt_if_unsaved() {
+                        continue;
+                    }
+                    app.prepare_for_exit();
+                    break 'outer;
+                }
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    app.preview_jump_clear_input();
+                    continue;
+                }
+                if key.code == KeyCode::BackTab
+                    || (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT)
+                {
+                    app.preview_jump_tab_complete_reverse();
+                    continue;
+                }
+                if key.code == KeyCode::Enter
+                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                {
+                    let keep_preview_focus = key.modifiers == KeyModifiers::SHIFT;
+                    let jumped = app.preview_jump_enter_action()?;
+                    if jumped && !keep_preview_focus {
+                        app.active = ActivePane::Navigation;
+                    }
+                    continue;
+                }
+                if key.modifiers.is_empty() {
+                    match key.code {
+                        KeyCode::Tab => {
+                            app.preview_jump_tab_complete();
+                            continue;
+                        },
+                        KeyCode::Backspace | KeyCode::Delete => {
+                            app.preview_jump_backspace();
+                            continue;
+                        },
+                        KeyCode::Up => {
+                            app.preview_jump_step(-1, preview_panel_width);
+                            continue;
+                        },
+                        KeyCode::Down => {
+                            app.preview_jump_step(1, preview_panel_width);
+                            continue;
+                        },
+                        KeyCode::Left => {
+                            app.preview_jump_step_horizontal(-1, preview_panel_width);
+                            continue;
+                        },
+                        KeyCode::Right => {
+                            app.preview_jump_step_horizontal(1, preview_panel_width);
+                            continue;
+                        },
+                        KeyCode::Char(ch) => {
+                            app.preview_jump_push_char(ch);
+                            continue;
+                        },
+                        _ => {},
+                    }
+                } else if key.modifiers == KeyModifiers::SHIFT
+                    && let KeyCode::Char(ch) = key.code
+                {
+                    app.preview_jump_push_char(ch);
+                    continue;
+                }
+                continue;
+            }
+
+            if app.active == ActivePane::Navigation {
+                app.nav_selected = clamp_nav_selection(app.nav_selected, app.nav_entries.len());
+                if key.code != KeyCode::Backspace {
+                    app.nav_backspace_parent_ready = true;
+                }
+                if app.nav_pending_file_shortcut.is_some() && key.code != KeyCode::Enter {
+                    if navigation_should_ignore_pending_shortcut_event(
+                        app.nav_pending_file_shortcut,
+                        key.code,
+                        key.kind,
+                    ) {
+                        continue;
+                    }
+                    if let Some(pending) = app.nav_pending_file_shortcut.take()
+                        && let Some(_) = navigation_filter_char(key.code, key.modifiers)
+                    {
+                        app.append_navigation_filter_char(pending);
+                    } else {
+                        app.nav_pending_file_shortcut = None;
+                    }
+                }
+                if navigation_clear_filter_shortcut(key.code, key.modifiers) {
+                    app.nav_pending_file_shortcut = None;
+                    app.clear_navigation_filter();
+                    continue;
+                }
+                if key.code == KeyCode::Backspace && key.modifiers.is_empty() {
+                    app.nav_pending_file_shortcut = None;
+                    if app.nav_filter.is_empty() {
+                        if !app.nav_backspace_parent_ready {
+                            continue;
+                        }
+                        let parent_path =
+                            app.nav_cwd.parent().unwrap_or(&app.nav_cwd).to_path_buf();
+                        app.shell.cd_to(Path::new("../"), app.shell_pending_input)?;
+                        app.nav_loaded = false;
+                        app.nav_selected = 0;
+                        app.nav_scroll = 0;
+                        app.record_preview_jump_history(&parent_path);
+                        app.nav_backspace_parent_ready = false;
+                    } else {
+                        app.pop_navigation_filter_char();
+                        app.nav_backspace_parent_ready =
+                            navigation_backspace_parent_ready_after_pop(
+                                app.nav_filter.is_empty(),
+                                app.nav_backspace_parent_ready,
+                            );
+                    }
+                    continue;
+                }
+                if let Some(ch) = navigation_filter_char(key.code, key.modifiers) {
+                    if app.nav_filter_char_held == Some(ch) {
+                        continue;
+                    }
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    app.nav_filter_char_held = Some(ch);
+                    let can_arm_shortcut = key.modifiers.is_empty()
+                        && navigation_file_shortcut_char(key.code).is_some_and(|shortcut| {
+                            navigation_file_command_action(
+                                app.nav_entries.get(app.nav_selected),
+                                shortcut,
+                                &app.config_state,
+                                &app.editor_program,
+                                &app.effective_identity,
+                            )
+                            .is_some()
+                        });
+                    if can_arm_shortcut {
+                        app.nav_pending_file_shortcut = navigation_file_shortcut_char(key.code);
+                        continue;
+                    }
+                    app.nav_pending_file_shortcut = None;
+                    app.append_navigation_filter_char(ch);
+                    continue;
+                }
+                if key.modifiers.is_empty() {
+                    match key.code {
+                        KeyCode::Up => {
+                            app.nav_pending_file_shortcut = None;
+                            app.nav_selected =
+                                nav_select_prev_wrap(app.nav_selected, app.nav_entries.len());
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::Down => {
+                            app.nav_pending_file_shortcut = None;
+                            app.nav_selected =
+                                nav_select_next_wrap(app.nav_selected, app.nav_entries.len());
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::Left => {
+                            app.nav_pending_file_shortcut = None;
+                            app.nav_selected =
+                                nav_select_home(app.nav_selected, app.nav_entries.len());
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::Right => {
+                            app.nav_pending_file_shortcut = None;
+                            app.nav_selected =
+                                nav_select_end(app.nav_selected, app.nav_entries.len());
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::Home => {
+                            app.nav_pending_file_shortcut = None;
+                            app.nav_selected =
+                                nav_select_home(app.nav_selected, app.nav_entries.len());
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::End => {
+                            app.nav_pending_file_shortcut = None;
+                            app.nav_selected =
+                                nav_select_end(app.nav_selected, app.nav_entries.len());
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::PageUp => {
+                            app.nav_pending_file_shortcut = None;
+                            let page = app.nav_viewport_rows.max(1);
+                            app.nav_selected = app.nav_selected.saturating_sub(page);
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::PageDown => {
+                            app.nav_pending_file_shortcut = None;
+                            let page = app.nav_viewport_rows.max(1);
+                            let max_selected = app.nav_entries.len().saturating_sub(1);
+                            app.nav_selected =
+                                app.nav_selected.saturating_add(page).min(max_selected);
+                            app.nav_scroll = nav_scroll_for_selection(
+                                app.nav_scroll,
+                                app.nav_selected,
+                                app.nav_entries.len(),
+                                app.nav_viewport_rows,
+                            );
+                            continue;
+                        },
+                        KeyCode::Enter => {
+                            let pending_shortcut = app.nav_pending_file_shortcut.take();
+                            if let Some(entry) = app.nav_entries.get(app.nav_selected) {
+                                if entry.is_dir {
+                                    let directory_path = entry.path.clone();
+                                    app.nav_filter.clear();
+                                    app.shell.cd_to(&directory_path, app.shell_pending_input)?;
+                                    app.nav_loaded = false;
+                                    app.nav_selected = 0;
+                                    app.nav_scroll = 0;
+                                    app.record_preview_jump_history(&directory_path);
+                                } else {
+                                    let shortcut = navigation_enter_file_shortcut(pending_shortcut);
+                                    let _ = run_selected_file_command_shortcut(&mut app, shortcut)?;
+                                }
+                            }
+                            continue;
+                        },
+                        _ => {
+                            app.nav_pending_file_shortcut = None;
+                        },
+                    }
+                } else if key.modifiers == KeyModifiers::CONTROL {
+                    app.nav_pending_file_shortcut = None;
+                    match key.code {
+                        KeyCode::Up => {
+                            app.nav_scroll = app.nav_scroll.saturating_sub(1);
+                            continue;
+                        },
+                        KeyCode::Down => {
+                            let max_scroll =
+                                nav_max_scroll(app.nav_entries.len(), app.nav_viewport_rows);
+                            app.nav_scroll = app.nav_scroll.saturating_add(1).min(max_scroll);
+                            continue;
+                        },
+                        _ => {},
+                    }
                 } else {
                     app.nav_pending_file_shortcut = None;
                 }
             }
-            if navigation_clear_filter_shortcut(key.code, key.modifiers) {
-                app.nav_pending_file_shortcut = None;
-                app.clear_navigation_filter();
-                continue;
-            }
-            if key.code == KeyCode::Backspace && key.modifiers.is_empty() {
-                app.nav_pending_file_shortcut = None;
-                if app.nav_filter.is_empty() {
-                    if !app.nav_backspace_parent_ready {
+
+            if let KeyCode::Char(ch) = key.code {
+                if ch == 'd' && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if app.block_exit_attempt_if_unsaved() {
                         continue;
                     }
-                    let parent_path = app.nav_cwd.parent().unwrap_or(&app.nav_cwd).to_path_buf();
-                    app.shell.cd_to(Path::new("../"), app.shell_pending_input)?;
-                    app.nav_loaded = false;
-                    app.nav_selected = 0;
-                    app.nav_scroll = 0;
-                    app.record_preview_jump_history(&parent_path);
-                    app.nav_backspace_parent_ready = false;
-                } else {
-                    app.pop_navigation_filter_char();
-                    app.nav_backspace_parent_ready = navigation_backspace_parent_ready_after_pop(
-                        app.nav_filter.is_empty(),
-                        app.nav_backspace_parent_ready,
-                    );
+                    app.prepare_for_exit();
+                    break 'outer;
                 }
-                continue;
-            }
-            if let Some(ch) = navigation_filter_char(key.code, key.modifiers) {
-                if app.nav_filter_char_held == Some(ch) {
-                    continue;
-                }
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                app.nav_filter_char_held = Some(ch);
-                let can_arm_shortcut = key.modifiers.is_empty()
-                    && navigation_file_shortcut_char(key.code).is_some_and(|shortcut| {
-                        navigation_file_command_action(
-                            app.nav_entries.get(app.nav_selected),
-                            shortcut,
-                            &app.config_state,
-                            &app.editor_program,
-                            &app.effective_identity,
-                        )
-                        .is_some()
-                    });
-                if can_arm_shortcut {
-                    app.nav_pending_file_shortcut = navigation_file_shortcut_char(key.code);
-                    continue;
-                }
-                app.nav_pending_file_shortcut = None;
-                app.append_navigation_filter_char(ch);
-                continue;
-            }
-            if key.modifiers.is_empty() {
-                match key.code {
-                    KeyCode::Up => {
-                        app.nav_pending_file_shortcut = None;
-                        app.nav_selected =
-                            nav_select_prev_wrap(app.nav_selected, app.nav_entries.len());
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::Down => {
-                        app.nav_pending_file_shortcut = None;
-                        app.nav_selected =
-                            nav_select_next_wrap(app.nav_selected, app.nav_entries.len());
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::Left => {
-                        app.nav_pending_file_shortcut = None;
-                        app.nav_selected = nav_select_home(app.nav_selected, app.nav_entries.len());
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::Right => {
-                        app.nav_pending_file_shortcut = None;
-                        app.nav_selected = nav_select_end(app.nav_selected, app.nav_entries.len());
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::Home => {
-                        app.nav_pending_file_shortcut = None;
-                        app.nav_selected = nav_select_home(app.nav_selected, app.nav_entries.len());
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::End => {
-                        app.nav_pending_file_shortcut = None;
-                        app.nav_selected = nav_select_end(app.nav_selected, app.nav_entries.len());
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::PageUp => {
-                        app.nav_pending_file_shortcut = None;
-                        let page = app.nav_viewport_rows.max(1);
-                        app.nav_selected = app.nav_selected.saturating_sub(page);
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::PageDown => {
-                        app.nav_pending_file_shortcut = None;
-                        let page = app.nav_viewport_rows.max(1);
-                        let max_selected = app.nav_entries.len().saturating_sub(1);
-                        app.nav_selected = app.nav_selected.saturating_add(page).min(max_selected);
-                        app.nav_scroll = nav_scroll_for_selection(
-                            app.nav_scroll,
-                            app.nav_selected,
-                            app.nav_entries.len(),
-                            app.nav_viewport_rows,
-                        );
-                        continue;
-                    },
-                    KeyCode::Enter => {
-                        let pending_shortcut = app.nav_pending_file_shortcut.take();
-                        if let Some(entry) = app.nav_entries.get(app.nav_selected) {
-                            if entry.is_dir {
-                                let directory_path = entry.path.clone();
-                                app.nav_filter.clear();
-                                app.shell.cd_to(&directory_path, app.shell_pending_input)?;
-                                app.nav_loaded = false;
-                                app.nav_selected = 0;
-                                app.nav_scroll = 0;
-                                app.record_preview_jump_history(&directory_path);
-                            } else {
-                                let shortcut = navigation_enter_file_shortcut(pending_shortcut);
-                                let _ = run_selected_file_command_shortcut(&mut app, shortcut)?;
-                            }
-                        }
-                        continue;
-                    },
-                    _ => {
-                        app.nav_pending_file_shortcut = None;
-                    },
-                }
-            } else if key.modifiers == KeyModifiers::CONTROL {
-                app.nav_pending_file_shortcut = None;
-                match key.code {
-                    KeyCode::Up => {
-                        app.nav_scroll = app.nav_scroll.saturating_sub(1);
-                        continue;
-                    },
-                    KeyCode::Down => {
-                        let max_scroll =
-                            nav_max_scroll(app.nav_entries.len(), app.nav_viewport_rows);
-                        app.nav_scroll = app.nav_scroll.saturating_add(1).min(max_scroll);
-                        continue;
-                    },
+                match ch {
                     _ => {},
                 }
-            } else {
-                app.nav_pending_file_shortcut = None;
-            }
-        }
-
-        if let KeyCode::Char(ch) = key.code {
-            if ch == 'd' && key.modifiers.contains(KeyModifiers::CONTROL) {
-                if app.block_exit_attempt_if_unsaved() {
-                    continue;
-                }
-                app.prepare_for_exit();
-                break;
-            }
-            match ch {
-                _ => {},
             }
         }
     }
+
+    // Drain and join the graphics writer before the terminal is restored so no
+    // in-flight image write races the teardown's reset sequences.
+    gfx_writer.shutdown();
 
     Ok(())
 }
