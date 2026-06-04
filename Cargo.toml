@@ -1,6 +1,6 @@
 [package]
 name = "navix"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Keyboard-first Rust TUI for file navigation, preview overlays, and embedded shell workflows."
@@ -22,3 +22,6 @@ ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 vt100 = "0.16"
+
+[dev-dependencies]
+insta = "1"
