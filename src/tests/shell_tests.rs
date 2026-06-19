@@ -284,6 +284,50 @@ fn terminal_query_replies_include_osc_color_answers() {
 }
 
 #[test]
+fn terminal_query_replies_handle_st_terminated_color_queries() {
+    // ST-terminated (ESC \) queries must be answered, not just BEL-terminated.
+    let replies = terminal_query_replies_for_test(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\", 24, 80);
+    let rendered = String::from_utf8_lossy(&replies);
+    assert!(rendered.contains("\x1b]10;rgb:ffff/ffff/ffff\x1b\\"));
+    assert!(rendered.contains("\x1b]11;rgb:0000/0000/0000\x1b\\"));
+}
+
+#[test]
+fn terminal_query_replies_answer_cursor_color_query() {
+    let replies = terminal_query_replies_for_test(b"\x1b]12;?\x07", 24, 80);
+    let rendered = String::from_utf8_lossy(&replies);
+    assert!(rendered.contains("\x1b]12;rgb:ffff/ffff/ffff\x1b\\"));
+}
+
+#[test]
+fn terminal_query_replies_answer_palette_query_with_xterm_defaults() {
+    // Index 1 (ANSI red) = 0x800000, index 196 (cube) = 0xff0000,
+    // index 232 (grayscale start) = 0x080808.
+    let replies = terminal_query_replies_for_test(b"\x1b]4;1;?\x07\x1b]4;196;?\x1b\\", 24, 80);
+    let rendered = String::from_utf8_lossy(&replies);
+    assert!(rendered.contains("\x1b]4;1;rgb:8080/0000/0000\x1b\\"));
+    assert!(rendered.contains("\x1b]4;196;rgb:ffff/0000/0000\x1b\\"));
+
+    let gray = terminal_query_replies_for_test(b"\x1b]4;232;?\x07", 24, 80);
+    assert!(String::from_utf8_lossy(&gray).contains("\x1b]4;232;rgb:0808/0808/0808\x1b\\"));
+}
+
+#[test]
+fn terminal_query_replies_handle_multiple_palette_pairs() {
+    let replies = terminal_query_replies_for_test(b"\x1b]4;0;?;15;?\x07", 24, 80);
+    let rendered = String::from_utf8_lossy(&replies);
+    assert!(rendered.contains("\x1b]4;0;rgb:0000/0000/0000\x1b\\"));
+    assert!(rendered.contains("\x1b]4;15;rgb:ffff/ffff/ffff\x1b\\"));
+}
+
+#[test]
+fn terminal_query_replies_ignore_incomplete_color_query() {
+    // No terminator in the chunk: do not emit a spurious reply.
+    let replies = terminal_query_replies_for_test(b"\x1b]10;?", 24, 80);
+    assert!(replies.is_empty());
+}
+
+#[test]
 fn kitty_unicode_placeholder_cell_survives_text_render() {
     let (has_placeholder, has_combining, has_fg) = placeholder_render_survival_for_test();
     // Passthrough placement relies on the placeholder cells reaching the host

@@ -1355,15 +1355,117 @@ fn terminal_query_replies(
         // Report terminal size in characters.
         replies.extend_from_slice(format!("\x1b[8;{rows};{cols}t").as_bytes());
     }
-    if stream.windows(7).any(|segment| segment == b"\x1b]10;?\x07") {
-        // Foreground color query (OSC 10).
-        replies.extend_from_slice(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
-    }
-    if stream.windows(7).any(|segment| segment == b"\x1b]11;?\x07") {
-        // Background color query (OSC 11).
-        replies.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x1b\\");
-    }
+    // OSC color queries (foreground 10, background 11, cursor 12, palette 4).
+    // Answered locally: forwarding them to the host would route the host's reply
+    // into Navix's stdin. A child left unanswered can stall on its response
+    // timeout before drawing, so a missing reply shows up as a slow first paint.
+    append_osc_color_query_replies(stream, &mut replies);
     replies
+}
+
+/// Scan `stream` for OSC color queries and append a reply for each. Handles both
+/// the BEL (`0x07`) and ST (`ESC \`) terminators. Operates on a single chunk; a
+/// query split across read chunks is not reassembled here.
+fn append_osc_color_query_replies(stream: &[u8], replies: &mut Vec<u8>) {
+    let mut idx = 0;
+    while idx + 1 < stream.len() {
+        let Some(rel) = stream[idx..].windows(2).position(|w| w == b"\x1b]") else {
+            return;
+        };
+        let body_start = idx + rel + 2;
+        let mut end = body_start;
+        let mut terminator_len = 0;
+        while end < stream.len() {
+            if stream[end] == 0x07 {
+                terminator_len = 1;
+                break;
+            }
+            if stream[end] == 0x1b && end + 1 < stream.len() && stream[end + 1] == b'\\' {
+                terminator_len = 2;
+                break;
+            }
+            end += 1;
+        }
+        if terminator_len == 0 {
+            // No terminator in this chunk; the rest is an incomplete sequence.
+            return;
+        }
+        push_color_query_reply(&stream[body_start..end], replies);
+        idx = end + terminator_len;
+    }
+}
+
+/// Append a reply for a single OSC payload `body` (the bytes between `ESC ]` and
+/// the terminator) if it is a recognized color query. Non-color OSC payloads are
+/// ignored.
+fn push_color_query_reply(body: &[u8], replies: &mut Vec<u8>) {
+    match body {
+        b"10;?" => replies.extend_from_slice(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+        b"11;?" => replies.extend_from_slice(b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+        b"12;?" => replies.extend_from_slice(b"\x1b]12;rgb:ffff/ffff/ffff\x1b\\"),
+        _ => {
+            if let Some(rest) = body.strip_prefix(b"4;") {
+                push_palette_query_reply(rest, replies);
+            }
+        },
+    }
+}
+
+/// Append palette-color replies for an OSC 4 query body (everything after the
+/// leading `4;`). Supports one or more `index;?` pairs, e.g. `4;1;?;2;?`. Replies
+/// use the standard xterm-256 default palette, which is what most terminals use
+/// unless re-themed.
+fn push_palette_query_reply(rest: &[u8], replies: &mut Vec<u8>) {
+    let Ok(text) = std::str::from_utf8(rest) else {
+        return;
+    };
+    let parts: Vec<&str> = text.split(';').collect();
+    let mut i = 0;
+    while i + 1 < parts.len() {
+        if parts[i + 1] == "?"
+            && let Ok(index) = parts[i].parse::<u8>()
+        {
+            let (r, g, b) = xterm256_default_rgb(index);
+            replies.extend_from_slice(
+                format!("\x1b]4;{index};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\")
+                    .as_bytes(),
+            );
+        }
+        i += 2;
+    }
+}
+
+/// The 8-bit-per-channel RGB of an xterm-256 palette index under the default
+/// palette: 0-15 standard ANSI, 16-231 the 6x6x6 color cube, 232-255 grayscale.
+fn xterm256_default_rgb(index: u8) -> (u8, u8, u8) {
+    const BASE16: [(u8, u8, u8); 16] = [
+        (0x00, 0x00, 0x00),
+        (0x80, 0x00, 0x00),
+        (0x00, 0x80, 0x00),
+        (0x80, 0x80, 0x00),
+        (0x00, 0x00, 0x80),
+        (0x80, 0x00, 0x80),
+        (0x00, 0x80, 0x80),
+        (0xc0, 0xc0, 0xc0),
+        (0x80, 0x80, 0x80),
+        (0xff, 0x00, 0x00),
+        (0x00, 0xff, 0x00),
+        (0xff, 0xff, 0x00),
+        (0x00, 0x00, 0xff),
+        (0xff, 0x00, 0xff),
+        (0x00, 0xff, 0xff),
+        (0xff, 0xff, 0xff),
+    ];
+    if index < 16 {
+        BASE16[index as usize]
+    } else if index < 232 {
+        let cube = index - 16;
+        let level = |v: u8| if v == 0 { 0 } else { v * 40 + 55 };
+        (level(cube / 36), level((cube / 6) % 6), level(cube % 6))
+    } else {
+        let gray = (index - 232) * 10 + 8;
+        (gray, gray, gray)
+    }
 }
 
 fn kitty_graphics_query_reply(seq: &[u8]) -> Option<Vec<u8>> {
