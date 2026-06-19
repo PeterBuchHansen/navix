@@ -529,6 +529,7 @@ fn parse_stream_events_detects_iterm2_and_treats_sixel_as_text() {
         StreamEvent::Graphics(graphics) => graphics.protocol == GraphicsProtocol::Iterm2Inline,
         StreamEvent::Text(_) => true,
         StreamEvent::Clipboard(_) => true,
+        StreamEvent::HostPassthrough(_) => true,
     }));
     assert!(events.iter().any(|event| {
         matches!(event, StreamEvent::Text(bytes) if String::from_utf8_lossy(bytes).contains("red"))
@@ -605,6 +606,59 @@ fn parse_stream_events_keeps_osc52_query_as_text() {
         StreamEvent::Text(bytes) => assert_eq!(bytes.as_slice(), b"\x1b]52;c;?\x07"),
         other => panic!("expected text event, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_stream_events_routes_osc9_notification_to_host_passthrough() {
+    for terminator in [b"\x07".as_slice(), b"\x1b\\".as_slice()] {
+        let mut seq = b"before\x1b]9;Build finished".to_vec();
+        seq.extend_from_slice(terminator);
+        seq.extend_from_slice(b"after");
+        let events = parse_stream_events_for_test(&[&seq]);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], StreamEvent::Text(bytes) if bytes == b"before"));
+        match &events[1] {
+            StreamEvent::HostPassthrough(bytes) => {
+                assert!(bytes.starts_with(b"\x1b]9;Build finished"));
+            },
+            other => panic!("expected host passthrough event, got {other:?}"),
+        }
+        assert!(matches!(&events[2], StreamEvent::Text(bytes) if bytes == b"after"));
+    }
+}
+
+#[test]
+fn parse_stream_events_routes_osc777_notify_to_host_passthrough() {
+    let events = parse_stream_events_for_test(&[b"\x1b]777;notify;Title;Body\x1b\\"]);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        StreamEvent::HostPassthrough(bytes) => {
+            assert!(bytes.starts_with(b"\x1b]777;notify;Title;Body"));
+        },
+        other => panic!("expected host passthrough event, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_stream_events_keeps_osc9_progress_subform_as_text() {
+    // OSC 9 ; 4 ; ... is taskbar progress, not a notification, so on this commit
+    // (before the progress passthrough lands) it stays on the text path.
+    let events = parse_stream_events_for_test(&[b"\x1b]9;4;1;50\x07"]);
+    assert_eq!(events.len(), 1);
+    assert!(
+        matches!(&events[0], StreamEvent::Text(bytes) if bytes.as_slice() == b"\x1b]9;4;1;50\x07")
+    );
+}
+
+#[test]
+fn parse_stream_events_reassembles_osc9_notification_split_across_chunks() {
+    let events = parse_stream_events_for_test(&[b"\x1b]9;Done ", b"copying\x07tail"]);
+    assert_eq!(events.len(), 2);
+    match &events[0] {
+        StreamEvent::HostPassthrough(bytes) => assert!(bytes.starts_with(b"\x1b]9;Done copying")),
+        other => panic!("expected host passthrough event, got {other:?}"),
+    }
+    assert!(matches!(&events[1], StreamEvent::Text(bytes) if bytes == b"tail"));
 }
 
 #[test]
