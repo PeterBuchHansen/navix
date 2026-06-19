@@ -528,6 +528,7 @@ fn parse_stream_events_detects_iterm2_and_treats_sixel_as_text() {
     assert!(events.iter().all(|event| match event {
         StreamEvent::Graphics(graphics) => graphics.protocol == GraphicsProtocol::Iterm2Inline,
         StreamEvent::Text(_) => true,
+        StreamEvent::Clipboard(_) => true,
     }));
     assert!(events.iter().any(|event| {
         matches!(event, StreamEvent::Text(bytes) if String::from_utf8_lossy(bytes).contains("red"))
@@ -559,6 +560,50 @@ fn parse_stream_events_keeps_plain_text_as_single_event() {
             assert_eq!(String::from_utf8_lossy(bytes), "plain text without escapes")
         },
         _ => panic!("expected plain text event"),
+    }
+}
+
+#[test]
+fn parse_stream_events_routes_osc52_clipboard_set_to_clipboard() {
+    // BEL-terminated and ST-terminated OSC 52 writes are both diverted to the
+    // host clipboard path instead of the text emulator.
+    for terminator in [b"\x07".as_slice(), b"\x1b\\".as_slice()] {
+        let mut seq = b"before\x1b]52;c;aGVsbG8=".to_vec();
+        seq.extend_from_slice(terminator);
+        seq.extend_from_slice(b"after");
+        let events = parse_stream_events_for_test(&[&seq]);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], StreamEvent::Text(bytes) if bytes == b"before"));
+        match &events[1] {
+            StreamEvent::Clipboard(bytes) => {
+                assert!(bytes.starts_with(b"\x1b]52;c;aGVsbG8="));
+            },
+            other => panic!("expected clipboard event, got {other:?}"),
+        }
+        assert!(matches!(&events[2], StreamEvent::Text(bytes) if bytes == b"after"));
+    }
+}
+
+#[test]
+fn parse_stream_events_reassembles_osc52_split_across_chunks() {
+    let events = parse_stream_events_for_test(&[b"\x1b]52;c;aGVsb", b"G8=\x07tail"]);
+    assert_eq!(events.len(), 2);
+    match &events[0] {
+        StreamEvent::Clipboard(bytes) => assert!(bytes.starts_with(b"\x1b]52;c;aGVsbG8=")),
+        other => panic!("expected clipboard event, got {other:?}"),
+    }
+    assert!(matches!(&events[1], StreamEvent::Text(bytes) if bytes == b"tail"));
+}
+
+#[test]
+fn parse_stream_events_keeps_osc52_query_as_text() {
+    // A read query (`Pd == "?"`) must not be forwarded: the host's reply would
+    // otherwise land in Navix's key input. It stays on the text path.
+    let events = parse_stream_events_for_test(&[b"\x1b]52;c;?\x07"]);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        StreamEvent::Text(bytes) => assert_eq!(bytes.as_slice(), b"\x1b]52;c;?\x07"),
+        other => panic!("expected text event, got {other:?}"),
     }
 }
 
