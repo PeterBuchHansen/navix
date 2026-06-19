@@ -101,7 +101,7 @@ pub(crate) struct ShellPane {
     master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     rx: Receiver<Vec<u8>>,
-    parser: Parser,
+    parser: Parser<BellCallbacks>,
     scroll_offset: usize,
     viewport_rows: usize,
     has_overflow: bool,
@@ -133,6 +133,11 @@ pub(crate) struct ShellPane {
     // verbatim to the host terminal. The local emulator silently drops these, so
     // without this a nested tool's notification/progress never reaches the host.
     host_passthrough: Vec<u8>,
+    // BEL (`0x07`) bytes to forward to the host so a child's bell rings the host
+    // terminal (audible or visual, per its config). vt100 consumes BEL into
+    // `audible_bell_count()` rather than re-emitting it, so without this the bell
+    // is swallowed. Filled by diffing the count each poll; see `pending_bell_bytes`.
+    bell_passthrough: Vec<u8>,
     // Hash of the most recently forwarded complete kitty transfer. A nested tool
     // (e.g. ratatui-image) may re-transmit a byte-identical image on every
     // repaint; under heavy scrolling these pile up in the bounded channel
@@ -434,7 +439,12 @@ impl ShellPane {
             master,
             writer,
             rx,
-            parser: Parser::new(init_rows, init_cols, shell_scrollback_limit()),
+            parser: Parser::new_with_callbacks(
+                init_rows,
+                init_cols,
+                shell_scrollback_limit(),
+                BellCallbacks::default(),
+            ),
             scroll_offset: 0,
             viewport_rows: 1,
             has_overflow: false,
@@ -448,6 +458,7 @@ impl ShellPane {
             graphics_passthrough_pending: Vec::new(),
             clipboard_passthrough: Vec::new(),
             host_passthrough: Vec::new(),
+            bell_passthrough: Vec::new(),
             last_kitty_transfer_hash: None,
             cell_width_px,
             cell_height_px,
@@ -684,6 +695,15 @@ impl ShellPane {
                 },
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
+        }
+        // Forward any bells the child rang this poll. vt100 consumes BEL into the
+        // `audible_bell` callback rather than re-emitting it, so drain the counter
+        // and queue a BEL per new bell for the host (which owns bell presentation).
+        let new_bells = self.parser.callbacks().audible;
+        if new_bells > 0 {
+            self.bell_passthrough
+                .extend_from_slice(&pending_bell_bytes(new_bells));
+            self.parser.callbacks_mut().audible = 0;
         }
         if processed_chunks > 0 || hit_limit || processed_graphics_events > 0 {
             let dur_ms = poll_start.elapsed().as_millis();
@@ -1035,6 +1055,37 @@ impl ShellPane {
     pub(crate) fn take_host_passthrough(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.host_passthrough)
     }
+
+    /// Take BEL bytes queued for the host this frame so a child's bell rings the
+    /// host terminal. Forwarded as-is (no cursor wrapping); the host decides
+    /// audible vs visual presentation.
+    pub(crate) fn take_bell_passthrough(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bell_passthrough)
+    }
+}
+
+/// Counts audible bells (`BEL`) the child rang. vt100 routes a control `BEL`
+/// here instead of re-emitting it, and crucially does *not* fire this for a
+/// `BEL` that merely terminates an OSC sequence, so the count reflects only real
+/// bells even when whole OSC sequences are fed to the emulator as text.
+#[derive(Default)]
+pub(crate) struct BellCallbacks {
+    pub(crate) audible: usize,
+}
+
+impl vt100::Callbacks for BellCallbacks {
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.audible = self.audible.saturating_add(1);
+    }
+}
+
+/// BEL bytes to forward to the host for the given number of bells rung since the
+/// last drain. One `BEL` per bell, capped per call so a child spamming bells
+/// can't flood the host writer; the caller resets its counter regardless, so the
+/// excess is intentionally dropped.
+pub(crate) fn pending_bell_bytes(new_bells: usize) -> Vec<u8> {
+    const MAX_BELLS_PER_POLL: usize = 8;
+    vec![0x07; new_bells.min(MAX_BELLS_PER_POLL)]
 }
 
 fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {

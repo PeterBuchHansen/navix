@@ -130,16 +130,16 @@ pub(crate) use runtime_helpers::{
     should_auto_close_preview_overlay, should_flush_positioned_graphics, should_show_scrollbar,
     should_throttle_mouse_passthrough_redraw, visible_range,
 };
-pub(crate) use shell::{ShellMetrics, ShellPane, shell_single_quote, wrap_graphics_passthrough};
 #[cfg(test)]
 pub(crate) use shell::{
-    bash_history_sync_prompt_command, cd_to_bytes, dedup_kitty_transfer,
+    BellCallbacks, bash_history_sync_prompt_command, cd_to_bytes, dedup_kitty_transfer,
     default_history_file_for_shell, kitty_graphics_query_reply_for_test,
     kitty_multipart_flush_summary_for_test, kitty_passthrough_staging_for_test,
-    parse_stream_events_for_test, placeholder_buffer_layout_for_test,
+    parse_stream_events_for_test, pending_bell_bytes, placeholder_buffer_layout_for_test,
     placeholder_render_survival_for_test, resolve_child_term_for_test,
     resolve_launch_shell_path_with, shell_program_name, terminal_query_replies_for_test,
 };
+pub(crate) use shell::{ShellMetrics, ShellPane, shell_single_quote, wrap_graphics_passthrough};
 #[cfg(test)]
 pub(crate) use shell::{parse_scrollback_limit, resolve_scrollback_limit};
 pub(crate) use state::{
@@ -904,6 +904,18 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
         }
         if !host_passthrough.is_empty() {
             gfx_writer.send(host_passthrough);
+        }
+
+        // Forward any terminal bell the child rang to the host so its configured
+        // bell (audible/visual) fires. vt100 swallows BEL into a counter, so
+        // without this a nested tool's bell never reaches the host. Drained every
+        // iteration regardless of the redraw decision.
+        let mut bell_passthrough = app.shell.take_bell_passthrough();
+        if let Some(session) = app.preview_command_shell.as_mut() {
+            bell_passthrough.extend_from_slice(&session.take_bell_passthrough());
+        }
+        if !bell_passthrough.is_empty() {
+            gfx_writer.send(bell_passthrough);
         }
 
         // Dirty-skip: the double-loop used to rebuild the whole ratatui buffer
