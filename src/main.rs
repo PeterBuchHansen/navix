@@ -893,6 +893,18 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
             gfx_writer.send(clipboard_passthrough);
         }
 
+        // Forward host-directed OSC (e.g. OSC 9 / OSC 777 desktop notifications)
+        // the child emitted to the host terminal. The local emulator drops these,
+        // so without this a nested tool's notification never reaches the desktop.
+        // Forwarded raw (no cursor wrapping) since they don't touch the screen.
+        let mut host_passthrough = app.shell.take_host_passthrough();
+        if let Some(session) = app.preview_command_shell.as_mut() {
+            host_passthrough.extend_from_slice(&session.take_host_passthrough());
+        }
+        if !host_passthrough.is_empty() {
+            gfx_writer.send(host_passthrough);
+        }
+
         // Dirty-skip: the double-loop used to rebuild the whole ratatui buffer
         // every iteration. Rebuild only when a render input actually changed so
         // an idle (or graphics-only) child no longer starves input handling —
