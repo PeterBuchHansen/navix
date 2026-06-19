@@ -30,6 +30,12 @@ pub(crate) struct GraphicsEvent {
 pub(crate) enum StreamEvent {
     Text(Vec<u8>),
     Graphics(GraphicsEvent),
+    /// A complete OSC 52 clipboard *set* sequence emitted by the child. It is
+    /// forwarded verbatim to the host terminal (which owns the system
+    /// clipboard) instead of being fed to the local emulator, which would
+    /// silently drop it. Clipboard *queries* (`Pd == "?"`) are intentionally not
+    /// surfaced here so the host's reply never lands in Navix's key input.
+    Clipboard(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +195,10 @@ impl GraphicsStreamParser {
         }
         let mut seq = Vec::new();
         std::mem::swap(&mut seq, &mut self.seq_buf);
+        if is_osc52_clipboard_set(&seq) {
+            out.push(StreamEvent::Clipboard(seq));
+            return;
+        }
         if let Some(protocol) = detect_graphics_protocol(&seq) {
             out.push(StreamEvent::Graphics(GraphicsEvent {
                 protocol,
@@ -222,6 +232,28 @@ fn mode_with_pending(is_dcs: bool, esc_pending: bool) -> Mode {
     } else {
         Mode::Apc { esc_pending }
     }
+}
+
+/// True when `seq` is a complete OSC 52 clipboard *set* sequence
+/// (`ESC ] 52 ; Pc ; Pd` terminated by BEL or ST) whose data payload `Pd` is
+/// real base64 rather than the `?` read query. Such sequences must be forwarded
+/// to the host so a nested tool's "copy" reaches the system clipboard, exactly
+/// as it would in a bare terminal. Queries return false: forwarding them would
+/// route the host's clipboard reply into Navix's stdin.
+fn is_osc52_clipboard_set(seq: &[u8]) -> bool {
+    let Some(body) = seq.strip_prefix(b"\x1b]52;") else {
+        return false;
+    };
+    let body = body
+        .strip_suffix(b"\x07")
+        .or_else(|| body.strip_suffix(b"\x1b\\"))
+        .unwrap_or(body);
+    // Body is `Pc ; Pd`; the data payload is everything after the first `;`.
+    let Some(sep) = body.iter().position(|&byte| byte == b';') else {
+        return false;
+    };
+    let data = &body[sep + 1..];
+    !data.is_empty() && data != b"?"
 }
 
 fn detect_graphics_protocol(seq: &[u8]) -> Option<GraphicsProtocol> {
