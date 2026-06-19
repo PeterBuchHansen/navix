@@ -129,9 +129,9 @@ pub(crate) struct ShellPane {
     // child reports a copy that never lands anywhere.
     clipboard_passthrough: Vec<u8>,
     // Complete host-directed OSC sequences (e.g. OSC 9 / OSC 777 desktop
-    // notifications) emitted by the child, forwarded verbatim to the host
-    // terminal. The local emulator silently drops these, so without this a
-    // nested tool's notification never reaches the desktop.
+    // notifications and OSC 9;4 taskbar progress) emitted by the child, forwarded
+    // verbatim to the host terminal. The local emulator silently drops these, so
+    // without this a nested tool's notification/progress never reaches the host.
     host_passthrough: Vec<u8>,
     // Hash of the most recently forwarded complete kitty transfer. A nested tool
     // (e.g. ratatui-image) may re-transmit a byte-identical image on every
@@ -573,8 +573,9 @@ impl ShellPane {
                                 self.clipboard_passthrough.extend_from_slice(&bytes);
                             },
                             StreamEvent::HostPassthrough(bytes) => {
-                                // Forward host-directed OSC (e.g. notifications)
-                                // verbatim; the local emulator would drop it.
+                                // Forward host-directed OSC (e.g. notifications,
+                                // taskbar progress) verbatim; the local emulator
+                                // would drop it.
                                 self.host_passthrough.extend_from_slice(&bytes);
                             },
                             StreamEvent::Graphics(graphics_event) => {
@@ -1027,9 +1028,10 @@ impl ShellPane {
         std::mem::take(&mut self.clipboard_passthrough)
     }
 
-    /// Take host-directed OSC bytes (e.g. OSC 9 / OSC 777 notifications) queued
-    /// for verbatim forwarding to the host terminal this frame. Forwarded as-is
-    /// (no cursor wrapping) since these are position-independent side channels.
+    /// Take host-directed OSC bytes (e.g. OSC 9 / OSC 777 notifications and
+    /// OSC 9;4 taskbar progress) queued for verbatim forwarding to the host
+    /// terminal this frame. Forwarded as-is (no cursor wrapping) since these are
+    /// position-independent side channels.
     pub(crate) fn take_host_passthrough(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.host_passthrough)
     }

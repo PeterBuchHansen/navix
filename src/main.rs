@@ -893,9 +893,10 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
             gfx_writer.send(clipboard_passthrough);
         }
 
-        // Forward host-directed OSC (e.g. OSC 9 / OSC 777 desktop notifications)
-        // the child emitted to the host terminal. The local emulator drops these,
-        // so without this a nested tool's notification never reaches the desktop.
+        // Forward host-directed OSC (e.g. OSC 9 / OSC 777 desktop notifications
+        // and OSC 9;4 taskbar progress) the child emitted to the host terminal.
+        // The local emulator drops these, so without this a nested tool's
+        // notification/progress never reaches the host.
         // Forwarded raw (no cursor wrapping) since they don't touch the screen.
         let mut host_passthrough = app.shell.take_host_passthrough();
         if let Some(session) = app.preview_command_shell.as_mut() {
