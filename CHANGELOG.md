@@ -8,6 +8,25 @@ All notable changes to this project are documented here.
 
 - No changes yet.
 
+## [0.3.4] - 2026-06-19
+
+Host-directed terminal side channels that nested tools emit in the Shell and
+Preview panes now reach the host terminal (or are answered locally) instead of
+being silently dropped by the local emulator, matching how the same tools behave
+when run directly in the host terminal.
+
+### Added
+
+- Forward child OSC 52 clipboard writes to the host terminal so a nested tool's "copy" reaches the system clipboard instead of being swallowed (#12).
+- Forward child desktop notifications (OSC 9 and OSC 777) to the host terminal (#13).
+- Forward child taskbar progress reports (OSC 9;4) to the host terminal (#14).
+- Answer child color queries (OSC 4 palette, OSC 10 foreground, OSC 11 background, OSC 12 cursor) locally so nested tools detect colors without their replies leaking into Navix key input, with a hardened query matcher that handles both BEL and ST terminators (#15).
+- Forward the child terminal bell (BEL) to the host terminal so a nested tool's bell rings the host (audible or visual, per its configuration) (#20).
+
+### Tests
+
+- Added coverage for OSC 52 clipboard passthrough, OSC 9/777 notification and OSC 9;4 progress passthrough, OSC 4/10/11/12 color query replies (BEL and ST termination, chunk reassembly, query vs set), and bell forwarding.
+
 ## [0.3.3] - 2026-06-04
 
 Embedded terminal graphics: nested TUI tools (document readers, image viewers,
