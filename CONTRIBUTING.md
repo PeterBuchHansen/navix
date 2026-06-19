@@ -21,10 +21,10 @@
   - `main_<issue-number>_<first-name>`
 - For sub-branches off that parent prefix, use:
   - `main_<issue-number>_<first-name>_<sub-n>_<first-name>_<sub-task-description>`
-- Keep description segments lowercase and concise, using underscores instead of spaces.
+- Keep description segments lowercase and concise, using hyphens instead of spaces within the description. The structural fields (`main`, issue number, first name, sub-number) stay separated by underscores.
 - Examples:
-  - Parent branch: `main_1_peter_post_release_alignment`
-  - Sub-branch: `main_1_peter_2_peter_fix_runtime_tests`
+  - Parent branch: `main_1_peter_post-release-alignment`
+  - Sub-branch: `main_1_peter_2_peter_fix-runtime-tests`
 
 ## PR scope rules
 
