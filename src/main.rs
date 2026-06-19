@@ -880,6 +880,19 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
             gfx_writer.send(preview_graphics);
         }
 
+        // Forward any OSC 52 clipboard writes the child emitted to the host
+        // terminal (which owns the system clipboard). The local emulator drops
+        // OSC 52, so without this a nested tool's "copied" never lands anywhere.
+        // Forwarded raw (no cursor wrapping) since clipboard ops don't touch the
+        // screen. Drained every iteration regardless of the redraw decision.
+        let mut clipboard_passthrough = app.shell.take_clipboard_passthrough();
+        if let Some(session) = app.preview_command_shell.as_mut() {
+            clipboard_passthrough.extend_from_slice(&session.take_clipboard_passthrough());
+        }
+        if !clipboard_passthrough.is_empty() {
+            gfx_writer.send(clipboard_passthrough);
+        }
+
         // Dirty-skip: the double-loop used to rebuild the whole ratatui buffer
         // every iteration. Rebuild only when a render input actually changed so
         // an idle (or graphics-only) child no longer starves input handling —
