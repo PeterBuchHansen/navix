@@ -39,7 +39,7 @@ pub(crate) enum StreamEvent {
     /// A complete host-directed OSC sequence that must reach the host terminal
     /// verbatim rather than the local emulator (which would silently drop it).
     /// Used for position-independent side channels such as desktop notifications
-    /// (`OSC 9` / `OSC 777`).
+    /// (`OSC 9` / `OSC 777`) or taskbar progress (`OSC 9 ; 4 ; ...`).
     HostPassthrough(Vec<u8>),
 }
 
@@ -274,22 +274,20 @@ fn strip_osc_terminator(body: &[u8]) -> &[u8] {
 
 /// True when `seq` is a complete host-directed OSC sequence that should be
 /// forwarded to the host terminal verbatim instead of being dropped by the local
-/// emulator. Currently covers desktop notifications:
-/// - `OSC 9 ; <message>` (iTerm2 / generic), excluding the `OSC 9 ; 4 ; ...`
-///   progress subform which is reserved for taskbar progress.
-/// - `OSC 777 ; notify ; <title> ; <body>` (urxvt-style).
+/// emulator. Currently covers position-independent side channels:
+/// - `OSC 9 ; <message>` desktop notifications (iTerm2 / generic).
+/// - `OSC 9 ; 4 ; <state> ; <percentage>` taskbar progress
+///   (ConEmu / Windows Terminal / WezTerm). This is an `OSC 9` subform, so it is
+///   matched by the `OSC 9` arm below rather than special-cased.
+/// - `OSC 777 ; notify ; <title> ; <body>` notifications (urxvt-style).
 ///
-/// These are position-independent side channels, so verbatim passthrough matches
+/// All are position-independent side channels, so verbatim passthrough matches
 /// bare-terminal behavior.
 fn is_host_passthrough_osc(seq: &[u8]) -> bool {
     if seq.starts_with(b"\x1b]777;notify;") {
         return true;
     }
     if let Some(rest) = seq.strip_prefix(b"\x1b]9;") {
-        // `OSC 9 ; 4 ; ...` is the progress subform, not a notification.
-        if rest.starts_with(b"4;") {
-            return false;
-        }
         return !strip_osc_terminator(rest).is_empty();
     }
     false
