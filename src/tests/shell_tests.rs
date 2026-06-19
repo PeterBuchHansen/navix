@@ -328,6 +328,39 @@ fn terminal_query_replies_ignore_incomplete_color_query() {
 }
 
 #[test]
+fn pending_bell_bytes_emits_one_bel_per_new_bell() {
+    assert!(pending_bell_bytes(0).is_empty());
+    assert_eq!(pending_bell_bytes(1), vec![0x07]);
+    assert_eq!(pending_bell_bytes(2), vec![0x07, 0x07]);
+}
+
+#[test]
+fn pending_bell_bytes_caps_bursts_to_stay_flood_safe() {
+    // A child spamming bells in one poll is capped; the caller drains its counter
+    // regardless, so the excess is intentionally dropped.
+    assert_eq!(pending_bell_bytes(1000).len(), 8);
+}
+
+#[test]
+fn bell_callbacks_count_only_real_bells() {
+    // The dependency the passthrough relies on: vt100 routes a control BEL to the
+    // audible_bell callback, a non-bell byte does not, and a BEL that merely
+    // terminates an OSC sequence is not counted as a bell.
+    let mut parser = Parser::new_with_callbacks(24, 80, 0, BellCallbacks::default());
+    assert_eq!(parser.callbacks().audible, 0);
+    parser.process(b"\x07");
+    assert_eq!(parser.callbacks().audible, 1);
+    parser.process(b"x");
+    assert_eq!(parser.callbacks().audible, 1);
+    parser.process(b"\x1b]0;title\x07");
+    assert_eq!(
+        parser.callbacks().audible,
+        1,
+        "OSC terminator BEL is not a bell"
+    );
+}
+
+#[test]
 fn kitty_unicode_placeholder_cell_survives_text_render() {
     let (has_placeholder, has_combining, has_fg) = placeholder_render_survival_for_test();
     // Passthrough placement relies on the placeholder cells reaching the host
