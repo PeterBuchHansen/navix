@@ -128,6 +128,11 @@ pub(crate) struct ShellPane {
     // clipboard. The local emulator silently drops OSC 52, so without this the
     // child reports a copy that never lands anywhere.
     clipboard_passthrough: Vec<u8>,
+    // Complete host-directed OSC sequences (e.g. OSC 9 / OSC 777 desktop
+    // notifications) emitted by the child, forwarded verbatim to the host
+    // terminal. The local emulator silently drops these, so without this a
+    // nested tool's notification never reaches the desktop.
+    host_passthrough: Vec<u8>,
     // Hash of the most recently forwarded complete kitty transfer. A nested tool
     // (e.g. ratatui-image) may re-transmit a byte-identical image on every
     // repaint; under heavy scrolling these pile up in the bounded channel
@@ -442,6 +447,7 @@ impl ShellPane {
             graphics_passthrough: Vec::new(),
             graphics_passthrough_pending: Vec::new(),
             clipboard_passthrough: Vec::new(),
+            host_passthrough: Vec::new(),
             last_kitty_transfer_hash: None,
             cell_width_px,
             cell_height_px,
@@ -565,6 +571,11 @@ impl ShellPane {
                                 // otherwise drop it and the copy would never
                                 // reach the system clipboard.
                                 self.clipboard_passthrough.extend_from_slice(&bytes);
+                            },
+                            StreamEvent::HostPassthrough(bytes) => {
+                                // Forward host-directed OSC (e.g. notifications)
+                                // verbatim; the local emulator would drop it.
+                                self.host_passthrough.extend_from_slice(&bytes);
                             },
                             StreamEvent::Graphics(graphics_event) => {
                                 let (cursor_row, cursor_col) =
@@ -1014,6 +1025,13 @@ impl ShellPane {
     /// terminal.
     pub(crate) fn take_clipboard_passthrough(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.clipboard_passthrough)
+    }
+
+    /// Take host-directed OSC bytes (e.g. OSC 9 / OSC 777 notifications) queued
+    /// for verbatim forwarding to the host terminal this frame. Forwarded as-is
+    /// (no cursor wrapping) since these are position-independent side channels.
+    pub(crate) fn take_host_passthrough(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.host_passthrough)
     }
 }
 

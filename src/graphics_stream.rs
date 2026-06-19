@@ -36,6 +36,11 @@ pub(crate) enum StreamEvent {
     /// silently drop it. Clipboard *queries* (`Pd == "?"`) are intentionally not
     /// surfaced here so the host's reply never lands in Navix's key input.
     Clipboard(Vec<u8>),
+    /// A complete host-directed OSC sequence that must reach the host terminal
+    /// verbatim rather than the local emulator (which would silently drop it).
+    /// Used for position-independent side channels such as desktop notifications
+    /// (`OSC 9` / `OSC 777`).
+    HostPassthrough(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +204,10 @@ impl GraphicsStreamParser {
             out.push(StreamEvent::Clipboard(seq));
             return;
         }
+        if is_host_passthrough_osc(&seq) {
+            out.push(StreamEvent::HostPassthrough(seq));
+            return;
+        }
         if let Some(protocol) = detect_graphics_protocol(&seq) {
             out.push(StreamEvent::Graphics(GraphicsEvent {
                 protocol,
@@ -254,6 +263,36 @@ fn is_osc52_clipboard_set(seq: &[u8]) -> bool {
     };
     let data = &body[sep + 1..];
     !data.is_empty() && data != b"?"
+}
+
+/// Strip a trailing OSC terminator (BEL or ST) from a complete sequence body.
+fn strip_osc_terminator(body: &[u8]) -> &[u8] {
+    body.strip_suffix(b"\x07")
+        .or_else(|| body.strip_suffix(b"\x1b\\"))
+        .unwrap_or(body)
+}
+
+/// True when `seq` is a complete host-directed OSC sequence that should be
+/// forwarded to the host terminal verbatim instead of being dropped by the local
+/// emulator. Currently covers desktop notifications:
+/// - `OSC 9 ; <message>` (iTerm2 / generic), excluding the `OSC 9 ; 4 ; ...`
+///   progress subform which is reserved for taskbar progress.
+/// - `OSC 777 ; notify ; <title> ; <body>` (urxvt-style).
+///
+/// These are position-independent side channels, so verbatim passthrough matches
+/// bare-terminal behavior.
+fn is_host_passthrough_osc(seq: &[u8]) -> bool {
+    if seq.starts_with(b"\x1b]777;notify;") {
+        return true;
+    }
+    if let Some(rest) = seq.strip_prefix(b"\x1b]9;") {
+        // `OSC 9 ; 4 ; ...` is the progress subform, not a notification.
+        if rest.starts_with(b"4;") {
+            return false;
+        }
+        return !strip_osc_terminator(rest).is_empty();
+    }
+    false
 }
 
 fn detect_graphics_protocol(seq: &[u8]) -> Option<GraphicsProtocol> {
