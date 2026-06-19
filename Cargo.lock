@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "navix"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
