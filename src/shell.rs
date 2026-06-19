@@ -123,6 +123,11 @@ pub(crate) struct ShellPane {
     // final chunk (`m=0`) lands — otherwise ratatui's per-frame draw bytes would
     // be interleaved between chunks and corrupt the image (visible as a tear).
     graphics_passthrough_pending: Vec<u8>,
+    // Complete OSC 52 clipboard *set* sequences emitted by the child, forwarded
+    // verbatim to the host terminal so a nested tool's "copy" reaches the system
+    // clipboard. The local emulator silently drops OSC 52, so without this the
+    // child reports a copy that never lands anywhere.
+    clipboard_passthrough: Vec<u8>,
     // Hash of the most recently forwarded complete kitty transfer. A nested tool
     // (e.g. ratatui-image) may re-transmit a byte-identical image on every
     // repaint; under heavy scrolling these pile up in the bounded channel
@@ -436,6 +441,7 @@ impl ShellPane {
             graphics_render_state: GraphicsRenderState::default(),
             graphics_passthrough: Vec::new(),
             graphics_passthrough_pending: Vec::new(),
+            clipboard_passthrough: Vec::new(),
             last_kitty_transfer_hash: None,
             cell_width_px,
             cell_height_px,
@@ -552,6 +558,13 @@ impl ShellPane {
                                     }
                                     self.parser.process(&bytes);
                                 }
+                            },
+                            StreamEvent::Clipboard(bytes) => {
+                                // Forward the child's OSC 52 clipboard write to
+                                // the host verbatim; the local emulator would
+                                // otherwise drop it and the copy would never
+                                // reach the system clipboard.
+                                self.clipboard_passthrough.extend_from_slice(&bytes);
                             },
                             StreamEvent::Graphics(graphics_event) => {
                                 let (cursor_row, cursor_col) =
@@ -993,6 +1006,14 @@ impl ShellPane {
     /// images reach the host as fast as in a bare terminal.
     pub(crate) fn take_graphics_passthrough(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.graphics_passthrough)
+    }
+
+    /// Take the child's OSC 52 clipboard bytes queued for verbatim forwarding to
+    /// the host terminal this frame. Forwarded as-is (no cursor wrapping) so a
+    /// nested tool's copy reaches the system clipboard, 1:1 with a bare
+    /// terminal.
+    pub(crate) fn take_clipboard_passthrough(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.clipboard_passthrough)
     }
 }
 
