@@ -69,7 +69,10 @@ mod tui;
 pub(crate) use app_state::{
     normalize_preview_jump_input_text_for_test, preview_jump_completion_candidates_for_test,
 };
-pub(crate) use config::{ConfigEditor, ConfigField, ConfigState, ExtensionCommandRule};
+pub(crate) use config::{
+    CommandSlotMode, ConfigEditor, ConfigField, ConfigState, DEFAULT_COMMAND_MASK,
+    ExtensionCommandRule, cycle_command_mask, normalize_command_mask,
+};
 #[cfg(test)]
 pub(crate) use config_ui::duplicate_extension_for_rule;
 pub(crate) use config_ui::{
@@ -2065,11 +2068,27 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                         continue;
                     },
                     KeyCode::Left if key.modifiers.is_empty() => {
-                        app.config_editor.selected_field = app.config_editor.selected_field.prev();
+                        let field = app.config_editor.selected_field;
+                        app.config_editor.selected_field = match app
+                            .config_state
+                            .extension_rules
+                            .get(app.config_editor.selected_rule)
+                        {
+                            Some(rule) => field.prev_in(rule),
+                            None => field.prev(),
+                        };
                         continue;
                     },
                     KeyCode::Right if key.modifiers.is_empty() => {
-                        app.config_editor.selected_field = app.config_editor.selected_field.next();
+                        let field = app.config_editor.selected_field;
+                        app.config_editor.selected_field = match app
+                            .config_state
+                            .extension_rules
+                            .get(app.config_editor.selected_rule)
+                        {
+                            Some(rule) => field.next_in(rule),
+                            None => field.next(),
+                        };
                         continue;
                     },
                     KeyCode::Enter if key.modifiers.is_empty() => {
@@ -2080,6 +2099,21 @@ fn run(options: RuntimeOptions) -> io::Result<()> {
                                 .push(default_extension_rule(&extension));
                             app.config_editor.selected_rule = 0;
                             app.config_editor.selected_field = ConfigField::Extension;
+                        }
+                        if let ConfigField::CommandMask(position) = app.config_editor.selected_field
+                        {
+                            if let Some(rule) = app
+                                .config_state
+                                .extension_rules
+                                .get_mut(app.config_editor.selected_rule)
+                            {
+                                rule.command_mask =
+                                    cycle_command_mask(&rule.command_mask, position);
+                                app.config_editor.status_message =
+                                    format!("command-mask: {}", rule.command_mask);
+                                app.config_editor.dirty = true;
+                            }
+                            continue;
                         }
                         if let Some(rule) = app
                             .config_state

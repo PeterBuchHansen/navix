@@ -107,6 +107,18 @@ pub(crate) fn default_extension_rule(extension: &str) -> ExtensionCommandRule {
         read_cmd: "bat {file}".to_string(),
         write_cmd: "$EDITOR {file}".to_string(),
         exec_cmd: "None".to_string(),
+        command_mask: DEFAULT_COMMAND_MASK.to_string(),
+    }
+}
+
+/// Helper line shown while the cursor is on a `command-mask` character.
+pub(crate) fn command_mask_hint(position: usize) -> &'static str {
+    match position {
+        0 => "read: r = show + check read permission | - = hide | Enter: change",
+        1 => "write: w = show + check write permission | - = hide | Enter: change",
+        _ => {
+            "exec: x = show + check exec permission | X = show, skip check | - = hide | Enter: change"
+        },
     }
 }
 
@@ -178,6 +190,7 @@ pub(crate) fn config_field_value<'a>(
         ConfigField::Read => &rule.read_cmd,
         ConfigField::Write => &rule.write_cmd,
         ConfigField::Exec => &rule.exec_cmd,
+        ConfigField::CommandMask(_) => &rule.command_mask,
     }
 }
 
@@ -187,6 +200,7 @@ pub(crate) fn set_config_field(rule: &mut ExtensionCommandRule, field: ConfigFie
         ConfigField::Read => rule.read_cmd = value.to_string(),
         ConfigField::Write => rule.write_cmd = value.to_string(),
         ConfigField::Exec => rule.exec_cmd = value.to_string(),
+        ConfigField::CommandMask(_) => rule.command_mask = normalize_command_mask(value),
     }
 }
 
@@ -384,6 +398,8 @@ pub(crate) fn config_panel_text(
         )]));
     }
 
+    const MASK_GAP: usize = 6;
+    let mut mask_lines: Vec<(usize, usize, Vec<Span<'static>>)> = Vec::new();
     for display_rule in &display_rules {
         let rule = &display_rule.rule;
         let baseline_rule = display_rule.baseline_rule.as_ref();
@@ -403,6 +419,10 @@ pub(crate) fn config_panel_text(
         let write_changed =
             baseline_rule.is_some_and(|baseline| baseline.write_cmd != rule.write_cmd);
         let exec_changed = baseline_rule.is_some_and(|baseline| baseline.exec_cmd != rule.exec_cmd);
+        let mask_changed = baseline_rule.is_some_and(|baseline| {
+            normalize_command_mask(&baseline.command_mask)
+                != normalize_command_mask(&rule.command_mask)
+        });
         let extension_style = if selected_rule && editor.selected_field == ConfigField::Extension {
             selected_style
         } else if display_rule.diff_kind == ConfigRuleDiffKind::Modified && extension_changed {
@@ -433,6 +453,13 @@ pub(crate) fn config_panel_text(
         let exec_style = if selected_rule && editor.selected_field == ConfigField::Exec {
             selected_style
         } else if display_rule.diff_kind == ConfigRuleDiffKind::Modified && exec_changed {
+            diff_added_style
+        } else if let Some(style) = rule_diff_style {
+            style
+        } else {
+            field_style
+        };
+        let mask_style = if display_rule.diff_kind == ConfigRuleDiffKind::Modified && mask_changed {
             diff_added_style
         } else if let Some(style) = rule_diff_style {
             style
@@ -497,113 +524,161 @@ pub(crate) fn config_panel_text(
                 ));
             }
         }
-        lines.push(Line::from(extension_line));
-
-        if selected_rule
-            && editable_rule
-            && editor.selected_field == ConfigField::Read
-            && editor.editing
+        let mut mask_spans = vec![Span::styled("command-mask: ", label_style)];
+        if let Some(baseline) = baseline_rule
+            && display_rule.diff_kind == ConfigRuleDiffKind::Modified
+            && mask_changed
         {
-            let mut line = vec![Span::styled("    read : ", label_style)];
-            line.extend(cursor_spans(
-                &editor.input_buffer,
-                editor.input_cursor,
-                edit_text_style,
-                edit_cursor_style,
+            mask_spans.push(Span::styled(
+                format!("- {}", normalize_command_mask(&baseline.command_mask)),
+                diff_removed_style,
             ));
-            lines.push(Line::from(line));
-        } else {
-            let mut line = vec![Span::styled("    read : ", label_style)];
-            if display_rule.diff_kind == ConfigRuleDiffKind::Modified && read_changed {
-                if let Some(baseline) = baseline_rule {
-                    line.push(Span::styled(
-                        format!("- {}", baseline.read_cmd),
-                        diff_removed_style,
-                    ));
-                    line.push(Span::styled(" ".to_string(), label_style));
-                    line.push(Span::styled(
-                        format!("+ {}", rule.read_cmd),
-                        diff_added_style,
-                    ));
+            mask_spans.push(Span::styled(" ".to_string(), label_style));
+            mask_spans.push(Span::styled("+ ".to_string(), diff_added_style));
+        }
+        for (position, ch) in normalize_command_mask(&rule.command_mask)
+            .chars()
+            .enumerate()
+        {
+            let style =
+                if selected_rule && editor.selected_field == ConfigField::CommandMask(position) {
+                    selected_style
+                } else {
+                    mask_style
+                };
+            mask_spans.push(Span::styled(ch.to_string(), style));
+        }
+        // Padding is filled in after all rules are laid out so the mask column
+        // lines up even while an extension is being edited or shows a diff.
+        let extension_line = Line::from(extension_line);
+        mask_lines.push((lines.len(), extension_line.width(), mask_spans));
+        lines.push(extension_line);
+
+        if rule.command_slot_mode(0) != CommandSlotMode::Hidden {
+            if selected_rule
+                && editable_rule
+                && editor.selected_field == ConfigField::Read
+                && editor.editing
+            {
+                let mut line = vec![Span::styled("    read : ", label_style)];
+                line.extend(cursor_spans(
+                    &editor.input_buffer,
+                    editor.input_cursor,
+                    edit_text_style,
+                    edit_cursor_style,
+                ));
+                lines.push(Line::from(line));
+            } else {
+                let mut line = vec![Span::styled("    read : ", label_style)];
+                if display_rule.diff_kind == ConfigRuleDiffKind::Modified && read_changed {
+                    if let Some(baseline) = baseline_rule {
+                        line.push(Span::styled(
+                            format!("- {}", baseline.read_cmd),
+                            diff_removed_style,
+                        ));
+                        line.push(Span::styled(" ".to_string(), label_style));
+                        line.push(Span::styled(
+                            format!("+ {}", rule.read_cmd),
+                            diff_added_style,
+                        ));
+                    } else {
+                        line.push(Span::styled(rule.read_cmd.clone(), read_style));
+                    }
                 } else {
                     line.push(Span::styled(rule.read_cmd.clone(), read_style));
                 }
-            } else {
-                line.push(Span::styled(rule.read_cmd.clone(), read_style));
+                lines.push(Line::from(line));
             }
-            lines.push(Line::from(line));
         }
 
-        if selected_rule
-            && editable_rule
-            && editor.selected_field == ConfigField::Write
-            && editor.editing
-        {
-            let mut line = vec![Span::styled("    write: ", label_style)];
-            line.extend(cursor_spans(
-                &editor.input_buffer,
-                editor.input_cursor,
-                edit_text_style,
-                edit_cursor_style,
-            ));
-            lines.push(Line::from(line));
-        } else {
-            let mut line = vec![Span::styled("    write: ", label_style)];
-            if display_rule.diff_kind == ConfigRuleDiffKind::Modified && write_changed {
-                if let Some(baseline) = baseline_rule {
-                    line.push(Span::styled(
-                        format!("- {}", baseline.write_cmd),
-                        diff_removed_style,
-                    ));
-                    line.push(Span::styled(" ".to_string(), label_style));
-                    line.push(Span::styled(
-                        format!("+ {}", rule.write_cmd),
-                        diff_added_style,
-                    ));
+        if rule.command_slot_mode(1) != CommandSlotMode::Hidden {
+            if selected_rule
+                && editable_rule
+                && editor.selected_field == ConfigField::Write
+                && editor.editing
+            {
+                let mut line = vec![Span::styled("    write: ", label_style)];
+                line.extend(cursor_spans(
+                    &editor.input_buffer,
+                    editor.input_cursor,
+                    edit_text_style,
+                    edit_cursor_style,
+                ));
+                lines.push(Line::from(line));
+            } else {
+                let mut line = vec![Span::styled("    write: ", label_style)];
+                if display_rule.diff_kind == ConfigRuleDiffKind::Modified && write_changed {
+                    if let Some(baseline) = baseline_rule {
+                        line.push(Span::styled(
+                            format!("- {}", baseline.write_cmd),
+                            diff_removed_style,
+                        ));
+                        line.push(Span::styled(" ".to_string(), label_style));
+                        line.push(Span::styled(
+                            format!("+ {}", rule.write_cmd),
+                            diff_added_style,
+                        ));
+                    } else {
+                        line.push(Span::styled(rule.write_cmd.clone(), write_style));
+                    }
                 } else {
                     line.push(Span::styled(rule.write_cmd.clone(), write_style));
                 }
-            } else {
-                line.push(Span::styled(rule.write_cmd.clone(), write_style));
+                lines.push(Line::from(line));
             }
-            lines.push(Line::from(line));
         }
 
-        if selected_rule
-            && editable_rule
-            && editor.selected_field == ConfigField::Exec
-            && editor.editing
-        {
-            let mut line = vec![Span::styled("    exec : ", label_style)];
-            line.extend(cursor_spans(
-                &editor.input_buffer,
-                editor.input_cursor,
-                edit_text_style,
-                edit_cursor_style,
-            ));
-            lines.push(Line::from(line));
-        } else {
-            let mut line = vec![Span::styled("    exec : ", label_style)];
-            if display_rule.diff_kind == ConfigRuleDiffKind::Modified && exec_changed {
-                if let Some(baseline) = baseline_rule {
-                    line.push(Span::styled(
-                        format!("- {}", baseline.exec_cmd),
-                        diff_removed_style,
-                    ));
-                    line.push(Span::styled(" ".to_string(), label_style));
-                    line.push(Span::styled(
-                        format!("+ {}", rule.exec_cmd),
-                        diff_added_style,
-                    ));
-                } else {
-                    line.push(Span::styled(rule.exec_cmd.clone(), exec_style));
-                }
+        if rule.command_slot_mode(2) != CommandSlotMode::Hidden {
+            let mut exec_spans = vec![Span::styled("    exec : ", label_style)];
+            if selected_rule
+                && editable_rule
+                && editor.selected_field == ConfigField::Exec
+                && editor.editing
+            {
+                exec_spans.extend(cursor_spans(
+                    &editor.input_buffer,
+                    editor.input_cursor,
+                    edit_text_style,
+                    edit_cursor_style,
+                ));
             } else {
-                line.push(Span::styled(rule.exec_cmd.clone(), exec_style));
+                match baseline_rule {
+                    Some(baseline)
+                        if display_rule.diff_kind == ConfigRuleDiffKind::Modified
+                            && exec_changed =>
+                    {
+                        exec_spans.push(Span::styled(
+                            format!("- {}", baseline.exec_cmd),
+                            diff_removed_style,
+                        ));
+                        exec_spans.push(Span::styled(" ".to_string(), label_style));
+                        exec_spans.push(Span::styled(
+                            format!("+ {}", rule.exec_cmd),
+                            diff_added_style,
+                        ));
+                    },
+                    _ => exec_spans.push(Span::styled(rule.exec_cmd.clone(), exec_style)),
+                }
             }
-            lines.push(Line::from(line));
+
+            lines.push(Line::from(exec_spans));
         }
         lines.push(Line::from(""));
+    }
+
+    let mask_column = mask_lines
+        .iter()
+        .map(|(_, width, _)| *width)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(MASK_GAP);
+    for (line_idx, width, mask_spans) in mask_lines {
+        let line = &mut lines[line_idx];
+        line.spans.push(Span::styled(
+            " ".repeat(mask_column.saturating_sub(width)),
+            label_style,
+        ));
+        line.spans.extend(mask_spans);
     }
 
     if editor.dirty {
@@ -634,6 +709,16 @@ pub(crate) fn config_panel_text(
             command_separator_style,
         );
         lines.push(Line::from(unsaved_spans));
+    }
+
+    if let ConfigField::CommandMask(position) = editor.selected_field
+        && !config.extension_rules.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            command_mask_hint(position).to_string(),
+            label_style,
+        )]));
     }
 
     if !editor.status_message.is_empty() {

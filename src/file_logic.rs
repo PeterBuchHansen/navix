@@ -115,28 +115,29 @@ pub(crate) fn preview_file_command_entries(
     let rule = matched_rule.unwrap_or(&fallback_rule);
 
     let access = effective_access_for_entry(entry, identity);
-    let mut out = Vec::with_capacity(3);
-    out.push(preview_file_command_entry(
-        'r',
-        &rule.read_cmd,
-        access.read,
-        &entry.name,
-        editor_program,
-    ));
-    out.push(preview_file_command_entry(
-        'w',
-        &rule.write_cmd,
-        access.write,
-        &entry.name,
-        editor_program,
-    ));
-    out.push(preview_file_command_entry(
-        'x',
-        &rule.exec_cmd,
-        access.exec,
-        &entry.name,
-        editor_program,
-    ));
+    let slots = [
+        ('r', &rule.read_cmd, access.read),
+        ('w', &rule.write_cmd, access.write),
+        ('x', &rule.exec_cmd, access.exec),
+    ];
+    let mut out = Vec::with_capacity(slots.len());
+    for (position, (shortcut, template, permitted)) in slots.into_iter().enumerate() {
+        // The rule's command mask decides per command: hidden (`-`) drops it
+        // entirely, uppercase skips the permission check (e.g. `X` for an exec
+        // command such as `xclip -selection clipboard < {file}`).
+        let allowed = match rule.command_slot_mode(position) {
+            CommandSlotMode::Hidden => continue,
+            CommandSlotMode::Unchecked => true,
+            CommandSlotMode::Checked => permitted,
+        };
+        out.push(preview_file_command_entry(
+            shortcut,
+            template,
+            allowed,
+            &entry.name,
+            editor_program,
+        ));
+    }
     out
 }
 

@@ -72,6 +72,7 @@ fn config_panel_text_uses_aligned_extension_block_layout() {
     assert!(rendered.contains("    read :"));
     assert!(rendered.contains("    write:"));
     assert!(rendered.contains("    exec :"));
+    assert!(rendered.contains("command-mask: \nr\nw\nx"));
 }
 
 #[test]
@@ -230,6 +231,7 @@ fn config_unsaved_added_rule_is_green_on_all_fields() {
         read_cmd: "bat {file}".to_string(),
         write_cmd: "$EDITOR {file}".to_string(),
         exec_cmd: "taplo fmt {file}".to_string(),
+        command_mask: "rwx".to_string(),
     });
     let mut editor = ConfigEditor::default();
     editor.selected_rule = 0;
@@ -281,6 +283,7 @@ fn config_unsaved_readded_extension_shows_partial_field_diff() {
         read_cmd: "bat {file}".to_string(),
         write_cmd: "$EDITOR {file}".to_string(),
         exec_cmd: "None".to_string(),
+        command_mask: "rwx".to_string(),
     });
     let mut editor = ConfigEditor::default();
     editor.selected_rule = 0;
@@ -367,6 +370,7 @@ fn config_normalize_migrates_old_bat_paging_flag() {
             read_cmd: "bat --paging=never {file}".to_string(),
             write_cmd: "$EDITOR {file}".to_string(),
             exec_cmd: "--".to_string(),
+            command_mask: "rwx".to_string(),
         }],
     };
     config.normalize();
@@ -391,6 +395,7 @@ fn set_config_field_normalizes_extension_only() {
         read_cmd: "a".to_string(),
         write_cmd: "b".to_string(),
         exec_cmd: "c".to_string(),
+        command_mask: "rwx".to_string(),
     };
     set_config_field(&mut rule, ConfigField::Extension, ".LOG");
     set_config_field(&mut rule, ConfigField::Read, "bat");
@@ -471,4 +476,213 @@ fn config_editor_backspace_and_delete_work_at_cursor() {
     assert_eq!(editor.input_buffer, "abde");
     editor.delete();
     assert_eq!(editor.input_buffer, "abe");
+}
+
+fn rendered_lines(text: &Text<'static>) -> Vec<String> {
+    text.lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn config_without_command_mask_key_defaults_to_rwx() {
+    let raw = r#"
+[[extension_rules]]
+extension = "md"
+read_cmd = "bat {file}"
+write_cmd = "$EDITOR {file}"
+exec_cmd = "mdterm {file}"
+"#;
+    let config: ConfigState = toml::from_str(raw).expect("parse legacy config");
+    assert_eq!(config.extension_rules[0].command_mask, "rwx");
+}
+
+#[test]
+fn command_mask_round_trips_through_toml() {
+    let mut config = ConfigState::default();
+    config.extension_rules[0].command_mask = "r-X".to_string();
+    let serialized = toml::to_string_pretty(&config).expect("serialize");
+    assert!(serialized.contains("command_mask = \"r-X\""));
+    let parsed: ConfigState = toml::from_str(&serialized).expect("parse");
+    assert_eq!(parsed.extension_rules[0].command_mask, "r-X");
+    assert_eq!(parsed.extension_rules[1].command_mask, "rwx");
+}
+
+#[test]
+fn normalize_command_mask_falls_back_per_invalid_position() {
+    assert_eq!(normalize_command_mask("rwx"), "rwx");
+    assert_eq!(normalize_command_mask("r-X"), "r-X");
+    assert_eq!(normalize_command_mask("---"), "---");
+    // Read/write have no uppercase option yet; typos fall back to the default
+    // letter so a command is never hidden by accident.
+    assert_eq!(normalize_command_mask("RWX"), "rwX");
+    assert_eq!(normalize_command_mask("r?q"), "rwx");
+    assert_eq!(normalize_command_mask(""), "rwx");
+    assert_eq!(normalize_command_mask("-"), "-wx");
+}
+
+#[test]
+fn config_load_normalizes_invalid_command_mask() {
+    let mut config = ConfigState::default();
+    config.extension_rules[0].command_mask = "zz-".to_string();
+    config.normalize();
+    assert_eq!(config.extension_rules[0].command_mask, "rw-");
+}
+
+#[test]
+fn cycle_command_mask_steps_through_allowed_options() {
+    assert_eq!(cycle_command_mask("rwx", 0), "-wx");
+    assert_eq!(cycle_command_mask("-wx", 0), "rwx");
+    assert_eq!(cycle_command_mask("rwx", 1), "r-x");
+    assert_eq!(cycle_command_mask("r-x", 1), "rwx");
+    assert_eq!(cycle_command_mask("rwx", 2), "rwX");
+    assert_eq!(cycle_command_mask("rwX", 2), "rw-");
+    assert_eq!(cycle_command_mask("rw-", 2), "rwx");
+}
+
+#[test]
+fn command_slot_mode_reads_case_and_dash() {
+    let mut rule = default_extension_rule("md");
+    rule.command_mask = "r-X".to_string();
+    assert_eq!(rule.command_slot_mode(0), CommandSlotMode::Checked);
+    assert_eq!(rule.command_slot_mode(1), CommandSlotMode::Hidden);
+    assert_eq!(rule.command_slot_mode(2), CommandSlotMode::Unchecked);
+}
+
+#[test]
+fn config_field_navigation_follows_layout_and_skips_hidden_commands() {
+    let mut rule = default_extension_rule("md");
+    assert_eq!(
+        ConfigField::Extension.next_in(&rule),
+        ConfigField::CommandMask(0)
+    );
+    assert_eq!(
+        ConfigField::CommandMask(0).next_in(&rule),
+        ConfigField::CommandMask(1)
+    );
+    assert_eq!(
+        ConfigField::CommandMask(2).next_in(&rule),
+        ConfigField::Read
+    );
+    assert_eq!(ConfigField::Exec.next_in(&rule), ConfigField::Extension);
+    assert_eq!(
+        ConfigField::Read.prev_in(&rule),
+        ConfigField::CommandMask(2)
+    );
+
+    rule.command_mask = "-w-".to_string();
+    assert_eq!(
+        ConfigField::CommandMask(2).next_in(&rule),
+        ConfigField::Write
+    );
+    assert_eq!(ConfigField::Write.next_in(&rule), ConfigField::Extension);
+    assert_eq!(
+        ConfigField::Write.prev_in(&rule),
+        ConfigField::CommandMask(2)
+    );
+    assert_eq!(ConfigField::Extension.prev_in(&rule), ConfigField::Write);
+
+    rule.command_mask = "---".to_string();
+    assert_eq!(
+        ConfigField::CommandMask(2).next_in(&rule),
+        ConfigField::Extension
+    );
+}
+
+#[test]
+fn ensure_valid_moves_off_a_field_hidden_in_the_new_rule() {
+    let mut config = ConfigState::default();
+    config.extension_rules[1].command_mask = "r-x".to_string();
+    let mut editor = ConfigEditor::default();
+    editor.selected_rule = 1;
+    editor.selected_field = ConfigField::Write;
+    editor.ensure_valid(&config);
+    assert_eq!(editor.selected_field, ConfigField::Exec);
+}
+
+#[test]
+fn config_panel_text_hides_masked_commands_but_keeps_none_visible() {
+    let mut config = ConfigState::default();
+    config.extension_rules[0].command_mask = "r-X".to_string();
+    config.extension_rules[0].write_cmd = "secret-write {file}".to_string();
+    config.extension_rules[1].exec_cmd = "None".to_string();
+    let text = config_panel_text(&config, &config, &ConfigEditor::default(), false);
+    let rendered = rendered_lines(&text);
+    assert!(!rendered.iter().any(|line| line.contains("secret-write")));
+    let md_idx = rendered
+        .iter()
+        .position(|line| line.contains(".md"))
+        .expect("md rule");
+    assert!(rendered[md_idx].ends_with("command-mask: r-X"));
+    assert!(rendered[md_idx + 1].starts_with("    read : "));
+    assert!(rendered[md_idx + 2].starts_with("    exec : "));
+    assert!(rendered.iter().any(|line| line == "    exec : None"));
+}
+
+#[test]
+fn config_panel_text_shows_mask_diff_and_hint_on_mask_field() {
+    let saved = ConfigState::default();
+    let mut config = saved.clone();
+    config.extension_rules[0].command_mask = "rwX".to_string();
+    let mut editor = ConfigEditor::default();
+    editor.dirty = true;
+    editor.selected_field = ConfigField::CommandMask(2);
+    let text = config_panel_text(&config, &saved, &editor, false);
+    let rendered = rendered_lines(&text);
+    assert!(
+        rendered[2].ends_with("command-mask: - rwx + rwX"),
+        "{:?}",
+        rendered[2]
+    );
+    let selected = text.lines[2].spans.last().expect("selected mask char");
+    assert_eq!(selected.content.as_ref(), "X");
+    assert_eq!(selected.style.bg, Some(Color::LightBlue));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.starts_with("exec: x = show + check exec permission"))
+    );
+
+    editor.selected_field = ConfigField::Read;
+    let rendered = rendered_lines(&config_panel_text(&config, &saved, &editor, false));
+    assert!(!rendered.iter().any(|line| line.contains("Enter: change")));
+}
+
+#[test]
+fn config_panel_text_aligns_mask_column_on_extension_lines() {
+    let mut config = ConfigState::default();
+    // A long exec command must not push the mask around or off-screen.
+    config.extension_rules[0].exec_cmd = "x".repeat(200);
+    let mut editor = ConfigEditor::default();
+    // Editing an extension changes that line's width; the column must hold.
+    editor.selected_rule = 1;
+    editor.selected_field = ConfigField::Extension;
+    editor.editing = true;
+    editor.set_input("markdown".to_string());
+    let rendered = rendered_lines(&config_panel_text(&config, &config, &editor, false));
+    let extension_lines: Vec<&String> = rendered
+        .iter()
+        .filter(|line| line.contains(": extension:"))
+        .collect();
+    assert_eq!(extension_lines.len(), config.extension_rules.len());
+    let columns: HashSet<usize> = extension_lines
+        .iter()
+        .map(|line| {
+            assert!(line.ends_with("command-mask: rwx"), "{line:?}");
+            let byte_idx = line.find("command-mask:").expect("mask on extension line");
+            // Compare display columns, not bytes: the `❯` marker is multi-byte.
+            line[..byte_idx].chars().count()
+        })
+        .collect();
+    assert_eq!(
+        columns.len(),
+        1,
+        "mask column misaligned: {extension_lines:?}"
+    );
 }

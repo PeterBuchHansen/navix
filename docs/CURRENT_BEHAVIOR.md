@@ -52,16 +52,32 @@ Notes:
 
 ## Preview command shortcuts
 
-When a file (``) is selected, Navix always renders all three file shortcuts in Preview:
+When a file (``) is selected, Navix renders the file shortcuts in Preview that the matching
+extension rule's `command_mask` does not hide:
 
 - `Esc+r`
 - `Esc+w`
 - `Esc+x`
 
-Each shortcut is enabled/disabled from:
+Each shown shortcut is enabled/disabled from:
 
-- extension command rule (`read_cmd`, `write_cmd`, `exec_cmd`)
-- effective file permissions (read/write/exec)
+- extension command rule (`read_cmd`, `write_cmd`, `exec_cmd`); `None` = not set, shown dimmed
+- effective file permissions (read/write/exec), unless the mask skips the check
+
+### Command mask
+
+Each extension rule has `command_mask` (default `"rwx"`), written like `ls` permission bits.
+Position 1 controls the read command, 2 the write command, 3 the exec command:
+
+| Char | Meaning |
+|---|---|
+| `r` / `w` / `x` | shown, enabled only with the matching effective file permission |
+| `X` | exec shown, permission check skipped (e.g. `xclip -selection clipboard < {file}` on a non-executable file) |
+| `-` | hidden: not in the Preview list, not in the config editor, shortcut does nothing |
+
+Allowed options per position: `r -`, `w -`, `x X -`. Invalid characters (e.g. a typo in a
+hand-edited config) fall back to that position's default letter. Hiding a command keeps its text in
+`config.toml`, so switching back restores it. Config files without `command_mask` default to `"rwx"`.
 
 If a shortcut is enabled:
 
@@ -136,6 +152,7 @@ When no extension rule matches, Navix uses fallback:
 - `read_cmd = "bat {file}"`
 - `write_cmd = "$EDITOR {file}"`
 - `exec_cmd = "None"` (disabled)
+- `command_mask = "rwx"`
 
 ## Preview overlay behavior
 
@@ -186,8 +203,10 @@ Primary controls:
 - `Ctrl+d`: discard unsaved changes
 - `Ctrl+n`: new extension rule
 - `Ctrl+Delete` / `Ctrl+Backspace` / `Ctrl+h`: delete selected rule
-- `↑/↓/←/→`: navigate rows/fields
-- `Enter`: start or commit field editing
+- `↑/↓/←/→`: navigate rows/fields; field order follows the layout (extension, the three
+  `command-mask` characters, read, write, exec) and skips commands hidden by the mask
+- `Enter`: start or commit field editing; on a `command-mask` character, cycle its options
+  (a helper line explains the options while the cursor is on the mask)
 
 ## Config path and defaults
 

@@ -507,6 +507,116 @@ fn navigation_file_command_action_disables_exec_without_exec_permission() {
     fs::remove_dir_all(base).expect("cleanup temp");
 }
 
+fn md_entry(path: &Path, mode: u32) -> NavEntry {
+    NavEntry {
+        name: "notes.md".to_string(),
+        path: path.to_path_buf(),
+        is_dir: false,
+        is_symlink: false,
+        file_type_char: '-',
+        mode,
+        nlink: 1,
+        uid: 1000,
+        gid: 1000,
+        size: 0,
+        mtime: 0,
+    }
+}
+
+fn config_with_md_mask(mask: &str) -> ConfigState {
+    let mut config = ConfigState::default();
+    let md_rule = config
+        .extension_rules
+        .iter_mut()
+        .find(|rule| rule.extension == "md")
+        .expect("default md rule");
+    md_rule.exec_cmd = "xclip -selection clipboard < {file}".to_string();
+    md_rule.command_mask = mask.to_string();
+    config
+}
+
+#[test]
+fn uppercase_x_mask_skips_exec_permission_check() {
+    let identity = test_identity(1000, 1000, &[1000]);
+    let base = unique_temp_path("navix-mask-upper-x");
+    fs::create_dir_all(&base).expect("create base");
+    let path = base.join("notes.md");
+    fs::write(&path, b"# notes\n").expect("write file");
+    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod file");
+    let entry = md_entry(&path, 0o644);
+
+    let action = navigation_file_command_action(
+        Some(&entry),
+        'x',
+        &config_with_md_mask("rwX"),
+        "nvim",
+        &identity,
+    );
+    assert_eq!(
+        action,
+        Some(NavigationFileCommandAction::PrefillShell(
+            "xclip -selection clipboard < notes.md".to_string()
+        ))
+    );
+
+    // Lowercase keeps the check: the same non-executable file stays disabled.
+    let action = navigation_file_command_action(
+        Some(&entry),
+        'x',
+        &config_with_md_mask("rwx"),
+        "nvim",
+        &identity,
+    );
+    assert_eq!(action, None);
+
+    fs::remove_dir_all(base).expect("cleanup temp");
+}
+
+#[test]
+fn dash_mask_hides_commands_from_preview_list_and_shortcuts() {
+    let identity = test_identity(1000, 1000, &[1000]);
+    let base = unique_temp_path("navix-mask-dash");
+    fs::create_dir_all(&base).expect("create base");
+    let path = base.join("notes.md");
+    fs::write(&path, b"# notes\n").expect("write file");
+    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod file");
+    let entry = md_entry(&path, 0o755);
+    let config = config_with_md_mask("r-X");
+
+    let entries = preview_file_command_entries(&entry, &config, "nvim", &identity);
+    let shortcuts: Vec<char> = entries.iter().map(|(key, _, _)| *key).collect();
+    assert_eq!(shortcuts, vec!['r', 'x']);
+    // Hidden even though the file is writable.
+    assert_eq!(
+        navigation_file_command_action(Some(&entry), 'w', &config, "nvim", &identity),
+        None
+    );
+
+    let all_hidden = config_with_md_mask("---");
+    assert!(preview_file_command_entries(&entry, &all_hidden, "nvim", &identity).is_empty());
+
+    fs::remove_dir_all(base).expect("cleanup temp");
+}
+
+#[test]
+fn none_command_stays_listed_and_dimmed_when_not_masked() {
+    let identity = test_identity(1000, 1000, &[1000]);
+    let base = unique_temp_path("navix-mask-none");
+    fs::create_dir_all(&base).expect("create base");
+    let path = base.join("notes.md");
+    fs::write(&path, b"# notes\n").expect("write file");
+    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod file");
+    let entry = md_entry(&path, 0o755);
+    let mut config = config_with_md_mask("rwX");
+    config.extension_rules[0].exec_cmd = "None".to_string();
+
+    let entries = preview_file_command_entries(&entry, &config, "nvim", &identity);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[2], ('x', "None".to_string(), false));
+
+    fs::remove_dir_all(base).expect("cleanup temp");
+}
+
 #[test]
 fn preview_depth_clamps_within_bounds() {
     assert_eq!(clamp_preview_depth(0, 6), 1);
