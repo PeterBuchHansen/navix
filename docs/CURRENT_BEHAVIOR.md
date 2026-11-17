@@ -65,6 +65,40 @@ If a shortcut is disabled, it is shown dimmed and triggering it does nothing.
 
 Shell prefill behavior clears the current shell input line first (`Ctrl+a`, `Ctrl+k`) and then inserts command text.
 
+## Command templates
+
+Extension command templates (`read_cmd`, `write_cmd`, `exec_cmd`) support two placeholders:
+
+- `$EDITOR`: replaced with the editor program verbatim
+- `{file}`: replaced with the selected file name, escaped for the shell quoting context it appears in
+
+Navix tracks single and double quotes in the template, including `\"` inside double quotes, so `{file}` is
+safe and correct wherever it is placed. Names without special characters are inserted unchanged.
+
+| Template position | Encoding | `my cv.pdf` becomes |
+|---|---|---|
+| unquoted (`bat {file}`) | backslash before shell-special characters | `bat my\ cv.pdf` |
+| inside `"…"` | backslash before `\ $ ` "` only | `"my cv.pdf"` |
+| inside `'…'` | `'` written as `'\''` | `'my cv.pdf'` |
+
+Unquoted names that are empty or contain control characters (e.g. a newline) fall back to single quotes,
+because a backslash cannot protect a newline.
+
+Tools that parse their own argument string need their own quotes around `{file}`. For example,
+smbclient splits its `-c` command on spaces:
+
+```toml
+exec_cmd = 'smbclient -U user //printserver/queue -c "print \"{file}\""'
+```
+
+Limitations:
+
+- A command parsed by a second shell (e.g. `ssh host "cat {file}"`) needs its own quoting for that shell,
+  such as `ssh host "cat '{file}'"`.
+- `Esc+x` prefills the interactive shell. A `!` inside a double-quoted `{file}` may trigger history
+  expansion in interactive bash. Unquoted `!` is escaped.
+- `{file_raw}` is a legacy alias of `{file}`.
+
 ## Preview path jump input
 
 When `Preview` is focused (and no preview command overlay is active), path input is always active:

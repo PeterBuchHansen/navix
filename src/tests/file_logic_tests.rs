@@ -94,64 +94,218 @@ fn preview_file_preview_text_marks_binary_files() {
 }
 
 #[test]
-fn preview_command_template_resolves_editor_and_filename() {
+fn preview_command_template_resolves_editor_and_plain_filename_unquoted() {
     let resolved = resolve_preview_command_template("$EDITOR {file}", "README.md", "nvim");
-    assert_eq!(resolved, "nvim 'README.md'");
+    assert_eq!(resolved, "nvim README.md");
 }
 
 #[test]
-fn preview_command_template_supports_raw_placeholder() {
-    let resolved = resolve_preview_command_template(
-        "tool --raw {file_raw} --safe {file}",
-        "my file.txt",
-        "nvim",
-    );
-    assert_eq!(resolved, "tool --raw my file.txt --safe 'my file.txt'");
-}
-
-#[test]
-fn preview_command_template_keeps_raw_placeholder_when_filename_contains_file_token() {
-    let resolved =
-        resolve_preview_command_template("tool --raw {file_raw} --safe {file}", "x{file}y", "nvim");
-    assert_eq!(resolved, "tool --raw x{file}y --safe 'x{file}y'");
+fn preview_command_template_escapes_per_quoting_context() {
+    let cases = [
+        ("bat {file}", "my cv.pdf", "bat my\\ cv.pdf"),
+        ("bash {file}", "it's.sh", "bash it\\'s.sh"),
+        ("./{file}", "script.sh", "./script.sh"),
+        ("bat {file}", "$(id).md", "bat \\$\\(id\\).md"),
+        ("bat {file}", "æøå.pdf", "bat æøå.pdf"),
+        ("bat {file}", "~home", "bat \\~home"),
+        ("bat {file}", "a=b~c", "bat a=b~c"),
+        ("bat {file}", "=cmd", "bat \\=cmd"),
+        (
+            "smbclient -c \"print {file}\"",
+            "cover-letter.da.pdf",
+            "smbclient -c \"print cover-letter.da.pdf\"",
+        ),
+        (
+            "smbclient -c \"print \\\"{file}\\\"\"",
+            "my cv.pdf",
+            "smbclient -c \"print \\\"my cv.pdf\\\"\"",
+        ),
+        (
+            "echo \"{file}\"",
+            "say \"$HOME\"",
+            "echo \"say \\\"\\$HOME\\\"\"",
+        ),
+        ("sh -c 'cat {file}'", "it's.md", "sh -c 'cat it'\\''s.md'"),
+        ("bat {file}", "", "bat ''"),
+        ("bat {file}", "a\nb.md", "bat 'a\nb.md'"),
+    ];
+    for (template, name, expected) in cases {
+        assert_eq!(
+            resolve_preview_command_template(template, name, "nvim"),
+            expected,
+            "template {template:?} with name {name:?}"
+        );
+    }
 }
 
 #[test]
 fn preview_command_template_handles_quoted_file_placeholder_and_single_quote_filename() {
     let resolved =
         resolve_preview_command_template("bat \"{file}\" && echo '{file}'", "o'hara.md", "nvim");
-    assert_eq!(resolved, "bat 'o'\\''hara.md' && echo 'o'\\''hara.md'");
+    assert_eq!(resolved, "bat \"o'hara.md\" && echo 'o'\\''hara.md'");
 }
 
 #[test]
-fn available_preview_file_commands_respects_permission_bits_and_rule_commands() {
-    let config = ConfigState::default();
-    let identity = test_identity(1000, 1000, &[1000]);
-    let base = unique_temp_path("navix-preview-cmds");
-    fs::create_dir_all(&base).expect("create base");
-    let path = base.join("README.md");
-    fs::write(&path, b"# test").expect("write file");
-    fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod file");
-    let entry = NavEntry {
-        name: "README.md".to_string(),
-        path: path.clone(),
-        is_dir: false,
-        is_symlink: false,
-        file_type_char: '-',
-        mode: 0o640,
-        nlink: 1,
-        uid: 1000,
-        gid: 1000,
-        size: 0,
-        mtime: 0,
-    };
+fn preview_command_template_tracks_escaped_quotes() {
+    // `\"` inside double quotes does not close the string, so `{file}` is still
+    // in double-quote context; an escaped `\'` outside quotes opens nothing.
+    assert_eq!(
+        resolve_preview_command_template("x \"a\\\" {file}\"", "my cv", "nvim"),
+        "x \"a\\\" my cv\""
+    );
+    assert_eq!(
+        resolve_preview_command_template("x \\' {file}", "my cv", "nvim"),
+        "x \\' my\\ cv"
+    );
+    // Unterminated quote: the open context applies to the rest of the template.
+    assert_eq!(
+        resolve_preview_command_template("x \"{file}", "my cv", "nvim"),
+        "x \"my cv"
+    );
+}
 
-    let commands = available_preview_file_commands(&entry, &config, "nvim", &identity);
-    assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0], ('r', "bat 'README.md'".to_string()));
-    assert_eq!(commands[1], ('w', "nvim 'README.md'".to_string()));
+#[test]
+fn preview_command_template_editor_value_does_not_shift_quote_context() {
+    assert_eq!(
+        resolve_preview_command_template("$EDITOR {file}", "my cv.md", "code --wait \"x"),
+        "code --wait \"x my\\ cv.md"
+    );
+}
 
-    fs::remove_dir_all(base).expect("cleanup temp");
+#[test]
+fn preview_command_template_does_not_rescan_inserted_file_name() {
+    assert_eq!(
+        resolve_preview_command_template("bat {file}", "{file}$EDITOR", "nvim"),
+        "bat \\{file\\}\\$EDITOR"
+    );
+}
+
+#[test]
+fn preview_command_template_file_raw_is_alias_of_file() {
+    let resolved = resolve_preview_command_template(
+        "tool --raw {file_raw} --safe {file} -c \"x {file_raw}\"",
+        "my file.txt",
+        "nvim",
+    );
+    assert_eq!(
+        resolved,
+        "tool --raw my\\ file.txt --safe my\\ file.txt -c \"x my file.txt\""
+    );
+}
+
+/// Names that stress every escaping rule.
+const ROUND_TRIP_NAMES: &[&str] = &[
+    "plain.md",
+    "my cv.pdf",
+    "it's.md",
+    "say \"hi\".md",
+    "back\\slash",
+    "$(touch navix-pwned).md",
+    "`touch navix-pwned`.md",
+    "$HOME",
+    "*?[ab].md",
+    ";&|<>().md",
+    "#hash",
+    "!bang",
+    "~tilde",
+    "=eq",
+    "a=b~c",
+    "x{file}y$EDITOR",
+    "100%",
+    "a^b",
+    "æøå.pdf",
+    "",
+    "a\nb.md",
+    "tab\there",
+    "-dash.md",
+];
+
+/// Templates covering every quoting context, plus a mixed one.
+const ROUND_TRIP_TEMPLATES: &[&str] = &[
+    "printf '%s' {file}",
+    "printf '%s' \"{file}\"",
+    "printf '%s' '{file}'",
+    "printf '%s' \"pre {file} post\" | sed -e 's/^pre //' -e 's/ post$//'",
+];
+
+fn available_round_trip_shells() -> Vec<Vec<&'static str>> {
+    let candidates: [&[&'static str]; 4] = [
+        &["/bin/sh", "-c"],
+        &["dash", "-c"],
+        &["bash", "--norc", "--noprofile", "-c"],
+        &["zsh", "-f", "-c"],
+    ];
+    candidates
+        .into_iter()
+        .filter(|argv| {
+            std::process::Command::new(argv[0])
+                .args(&argv[1..])
+                .arg("true")
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+        .map(<[&str]>::to_vec)
+        .collect()
+}
+
+#[test]
+fn expanded_file_names_round_trip_through_real_shells() {
+    let shells = available_round_trip_shells();
+    assert!(!shells.is_empty(), "no POSIX shell available");
+    let workdir = unique_temp_path("navix-file-round-trip");
+    fs::create_dir_all(&workdir).expect("create workdir");
+    for shell in &shells {
+        for template in ROUND_TRIP_TEMPLATES {
+            for name in ROUND_TRIP_NAMES {
+                // The mixed template uses sed line-wise; skip names with newlines there.
+                if template.contains("sed") && name.contains('\n') {
+                    continue;
+                }
+                let command = resolve_preview_command_template(template, name, "nvim");
+                let output = std::process::Command::new(shell[0])
+                    .args(&shell[1..])
+                    .arg(&command)
+                    .current_dir(&workdir)
+                    .output()
+                    .expect("run shell");
+                assert!(
+                    output.status.success(),
+                    "{shell:?} failed for {name:?}: {command:?}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let mut printed = output.stdout;
+                if template.contains("sed") && printed.last() == Some(&b'\n') {
+                    printed.pop();
+                }
+                assert_eq!(
+                    String::from_utf8_lossy(&printed),
+                    *name,
+                    "{shell:?} mangled {name:?} via {command:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        !workdir.join("navix-pwned").exists(),
+        "a file name executed a command"
+    );
+    fs::remove_dir_all(workdir).expect("cleanup workdir");
+}
+
+#[test]
+fn encode_file_name_for_context_matches_rules() {
+    assert_eq!(
+        encode_file_name_for_context("a b'c\"$d", TemplateQuoteContext::Unquoted),
+        "a\\ b\\'c\\\"\\$d"
+    );
+    assert_eq!(
+        encode_file_name_for_context("a b'c\"$d", TemplateQuoteContext::Double),
+        "a b'c\\\"\\$d"
+    );
+    assert_eq!(
+        encode_file_name_for_context("a b'c\"$d", TemplateQuoteContext::Single),
+        "a b'\\''c\"$d"
+    );
 }
 
 #[test]
@@ -179,8 +333,8 @@ fn available_preview_file_commands_fallback_for_unknown_extension() {
 
     let commands = available_preview_file_commands(&entry, &config, "nvim", &identity);
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0], ('r', "bat 'editor.html'".to_string()));
-    assert_eq!(commands[1], ('w', "nvim 'editor.html'".to_string()));
+    assert_eq!(commands[0], ('r', "bat editor.html".to_string()));
+    assert_eq!(commands[1], ('w', "nvim editor.html".to_string()));
 
     fs::remove_dir_all(base).expect("cleanup temp");
 }
@@ -212,7 +366,7 @@ fn navigation_file_command_action_runs_read_in_preview() {
     assert_eq!(
         action,
         Some(NavigationFileCommandAction::RunReadInPreview(
-            "bat 'README.md'".to_string()
+            "bat README.md".to_string()
         ))
     );
 
@@ -246,7 +400,7 @@ fn navigation_file_command_action_runs_write_in_preview() {
     assert_eq!(
         action,
         Some(NavigationFileCommandAction::RunWriteInPreview(
-            "nvim 'README.md'".to_string()
+            "nvim README.md".to_string()
         ))
     );
 
@@ -280,7 +434,7 @@ fn navigation_file_command_action_prefills_exec_in_shell() {
     assert_eq!(
         action,
         Some(NavigationFileCommandAction::PrefillShell(
-            "bash 'script.sh'".to_string()
+            "bash script.sh".to_string()
         ))
     );
 

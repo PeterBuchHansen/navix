@@ -84,6 +84,8 @@ pub(crate) use config_ui::{
 #[cfg(test)]
 pub(crate) use file_logic::preview_file_preview_text;
 #[cfg(test)]
+pub(crate) use file_logic::{TemplateQuoteContext, encode_file_name_for_context};
+#[cfg(test)]
 pub(crate) use file_logic::{
     available_preview_file_commands, effective_access_from_mode, kernel_effective_access_for_path,
     permission_bits, preview_directory_tree_lines, resolve_preview_command_template,

@@ -168,21 +168,111 @@ fn preview_command_display(template: &str, file_name: &str, editor_program: &str
     resolve_preview_command_template(template.trim(), file_name, editor_program)
 }
 
+/// Shell quoting context at a point in a command template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemplateQuoteContext {
+    Unquoted,
+    Single,
+    Double,
+}
+
+const FILE_PLACEHOLDER: &str = "{file}";
+// Legacy alias kept so older configs keep working; same encoding as `{file}`.
+const FILE_RAW_PLACEHOLDER: &str = "{file_raw}";
+const EDITOR_PLACEHOLDER: &str = "$EDITOR";
+
+/// Expand a command template. `{file}` is encoded for the shell quoting context
+/// it appears in, so `bat {file}`, `-c "print {file}"` and `sh -c 'cat {file}'`
+/// all receive the file name intact. `$EDITOR` is inserted verbatim and does not
+/// affect quote tracking; the inserted file name is never rescanned.
 pub(crate) fn resolve_preview_command_template(
     template: &str,
     file_name: &str,
     editor_program: &str,
 ) -> String {
-    let escaped_file = shell_single_quote(file_name);
-    let raw_marker = "\u{0}NAVIX_FILE_RAW\u{0}";
-    template
-        .replace("$EDITOR", editor_program)
-        .replace("{file_raw}", raw_marker)
-        // Preserve common user forms like "{file}" and '{file}' while keeping shell-safe output.
-        .replace("\"{file}\"", &escaped_file)
-        .replace("'{file}'", &escaped_file)
-        .replace("{file}", &escaped_file)
-        .replace(raw_marker, file_name)
+    let mut out = String::with_capacity(template.len() + file_name.len());
+    let mut context = TemplateQuoteContext::Unquoted;
+    let mut rest = template;
+    while let Some(ch) = rest.chars().next() {
+        if let Some(after) = rest
+            .strip_prefix(FILE_RAW_PLACEHOLDER)
+            .or_else(|| rest.strip_prefix(FILE_PLACEHOLDER))
+        {
+            out.push_str(&encode_file_name_for_context(file_name, context));
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix(EDITOR_PLACEHOLDER) {
+            out.push_str(editor_program);
+            rest = after;
+            continue;
+        }
+        rest = &rest[ch.len_utf8()..];
+        out.push(ch);
+        match (context, ch) {
+            // A backslash makes the next char literal outside single quotes, so
+            // `\"` inside double quotes does not end the string.
+            (TemplateQuoteContext::Unquoted | TemplateQuoteContext::Double, '\\') => {
+                if let Some(next) = rest.chars().next() {
+                    out.push(next);
+                    rest = &rest[next.len_utf8()..];
+                }
+            },
+            (TemplateQuoteContext::Unquoted, '\'') => context = TemplateQuoteContext::Single,
+            (TemplateQuoteContext::Unquoted, '"') => context = TemplateQuoteContext::Double,
+            (TemplateQuoteContext::Single, '\'') | (TemplateQuoteContext::Double, '"') => {
+                context = TemplateQuoteContext::Unquoted
+            },
+            _ => {},
+        }
+    }
+    out
+}
+
+/// Encode `file_name` so the shell reads it back byte for byte in `context`.
+pub(crate) fn encode_file_name_for_context(
+    file_name: &str,
+    context: TemplateQuoteContext,
+) -> String {
+    match context {
+        TemplateQuoteContext::Unquoted => escape_unquoted_file_name(file_name),
+        TemplateQuoteContext::Double => {
+            let mut out = String::with_capacity(file_name.len());
+            for ch in file_name.chars() {
+                if matches!(ch, '\\' | '$' | '`' | '"') {
+                    out.push('\\');
+                }
+                out.push(ch);
+            }
+            out
+        },
+        // Close the quote, add an escaped quote, reopen.
+        TemplateQuoteContext::Single => file_name.replace('\'', "'\\''"),
+    }
+}
+
+/// Backslash-escape only the characters a shell would interpret. Plain names
+/// (the common case) come back unchanged. Empty names and names with control
+/// characters fall back to single quotes, because a backslash cannot protect a
+/// newline (`\` + newline is a line continuation).
+fn escape_unquoted_file_name(file_name: &str) -> String {
+    if file_name.is_empty() || file_name.chars().any(char::is_control) {
+        return shell_single_quote(file_name);
+    }
+    let mut out = String::with_capacity(file_name.len());
+    for (idx, ch) in file_name.chars().enumerate() {
+        let safe = ch.is_ascii_alphanumeric()
+            || matches!(ch, '.' | '_' | '-' | ',' | '/' | ':' | '@' | '%' | '+')
+            || (!ch.is_ascii() && ch.is_alphanumeric())
+            // `~` (home expansion) and `=` (zsh `=cmd` expansion) only matter
+            // at the start of a word.
+            || (idx > 0 && matches!(ch, '=' | '~'));
+        if !safe {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub(crate) fn clamp_preview_depth(depth: usize, max_depth: usize) -> usize {
