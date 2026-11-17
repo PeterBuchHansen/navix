@@ -6,6 +6,18 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- No changes yet.
+
+## [0.4.0] - 2026-11-17
+
+File commands become configurable per extension, `{file}` expands correctly
+wherever it appears in a command, and the Shell pane recovers cleanly when a
+full-screen program dies (killed, crashed, or its SSH connection dropped)
+instead of leaving a stuck alt screen with mouse escape codes leaking onto the
+prompt.
+
+### Added
+
 - Per-extension `command_mask` (`command-mask: rwx` on the extension line of the config editor): `-` hides a command from Preview and the editor, and `X` keeps the exec command enabled without the execute bit, so `Esc+x` can run commands such as `xclip -selection clipboard < {file}` on files without the execute bit.
 
 ### Changed
@@ -17,6 +29,10 @@ All notable changes to this project are documented here.
 - Shell pane and interactive Preview overlays forward mouse events only as the child requested them (mode and X10/UTF-8/SGR encoding); without mouse reporting, wheel notches on the alt screen become arrow keys instead of leaking `<64;…M` onto the input (#30).
 - Shell pane resets modes a dead full-screen child left on (alt screen, mouse reporting, hidden cursor) as soon as the shell takes the terminal back, so no `reset` is needed after a killed or crashed TUI or a dropped SSH session (#30).
 - Shell pane no longer stays stuck in alt-screen mode (fullish layout, hidden scrollback, mouse-wheel escape codes leaking onto the prompt) after a full-screen child exits abruptly: alt-screen state is now read from the embedded emulator, so `reset` recovers it as in a plain terminal, and combined mode lists such as `ESC[?1006;1049h` are honoured (#24).
+
+### Tests
+
+- Added real-shell round-trip tests for `{file}` escaping (sh, dash, bash and zsh, with injection payloads in every quoting context), real-PTY tests for alt-screen recovery via `reset` and for automatic recovery after a killed foreground child, and coverage for the command mask (parsing, navigation, hidden commands, editor rendering) and child mouse encoding (modes, X10/UTF-8/SGR).
 
 ## [0.3.4] - 2026-06-19
 
