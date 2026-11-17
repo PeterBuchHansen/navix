@@ -1,5 +1,7 @@
 use super::*;
+use crate::ShellPane;
 use std::path::Path;
+use std::time::Instant;
 
 fn kitty_transmit(id: u32, payload: &str) -> Vec<u8> {
     format!("\x1b_Ga=T,i={id},f=32,U=1;{payload}\x1b\\").into_bytes()
@@ -836,4 +838,78 @@ fn resolve_launch_shell_ignores_non_shell_parent_and_uses_shell_env() {
 fn resolve_launch_shell_falls_back_to_bin_sh_when_no_candidates_exist() {
     let resolved = resolve_launch_shell_path_with(None, None, None, |_| None);
     assert_eq!(resolved, "/bin/sh");
+}
+
+/// Feed `bytes` to an emulator configured like a navix pane and report whether
+/// it ends on the alternate screen. Pins the vt100 behavior
+/// `ShellPane::in_alt_screen` relies on.
+fn emulator_alt_screen_after(bytes: &[u8]) -> bool {
+    let mut parser = Parser::new(24, 80, 100);
+    parser.process(bytes);
+    parser.screen().alternate_screen()
+}
+
+#[test]
+fn emulator_alt_screen_follows_enter_and_exit_modes() {
+    assert!(emulator_alt_screen_after(b"\x1b[?1049h"));
+    assert!(!emulator_alt_screen_after(b"\x1b[?1049h\x1b[?1049l"));
+    assert!(emulator_alt_screen_after(b"\x1b[?47h"));
+    assert!(!emulator_alt_screen_after(b"\x1b[?47h\x1b[?47l"));
+}
+
+#[test]
+fn emulator_alt_screen_is_left_by_full_reset() {
+    // `reset` emits RIS (`ESC c`) rather than `ESC[?1049l`. A child that died on
+    // the alternate screen must be recoverable with `reset` (#24).
+    assert!(!emulator_alt_screen_after(b"\x1b[?1049hstale tui\x1bc"));
+}
+
+#[test]
+fn emulator_alt_screen_handles_combined_mode_lists() {
+    assert!(emulator_alt_screen_after(b"\x1b[?1006;1049h"));
+    assert!(!emulator_alt_screen_after(b"\x1b[?1049h\x1b[?1006;1049l"));
+}
+
+#[test]
+fn emulator_alt_screen_tracks_sequences_split_across_chunks() {
+    let mut parser = Parser::new(24, 80, 100);
+    parser.process(b"\x1b[?10");
+    parser.process(b"49h");
+    assert!(parser.screen().alternate_screen());
+    parser.process(b"\x1b");
+    parser.process(b"c");
+    assert!(!parser.screen().alternate_screen());
+}
+
+fn poll_until_alt_screen(pane: &mut ShellPane, expected: bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        pane.poll_output();
+        if pane.in_alt_screen() == expected {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+#[test]
+fn shell_pane_recovers_from_stranded_alt_screen_on_full_reset() {
+    // A child enters the alternate screen and "dies" without leaving it; the
+    // pane must report alt-screen, then leave it once `reset`'s RIS arrives.
+    let cwd = std::env::temp_dir();
+    let mut pane = ShellPane::spawn_command(
+        "printf '\\033[?1049h'; sleep 0.3; printf '\\033c'; sleep 30",
+        &cwd,
+    )
+    .expect("spawn pane");
+    assert!(
+        poll_until_alt_screen(&mut pane, true),
+        "pane never entered alt screen"
+    );
+    assert!(
+        poll_until_alt_screen(&mut pane, false),
+        "pane stayed on alt screen after RIS"
+    );
+    pane.terminate();
 }

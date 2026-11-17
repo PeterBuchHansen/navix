@@ -107,8 +107,6 @@ pub(crate) struct ShellPane {
     has_overflow: bool,
     pty_rows: u16,
     pty_cols: u16,
-    alt_screen_active: bool,
-    ansi_tail: Vec<u8>,
     graphics_parser: GraphicsStreamParser,
     graphics_render_state: GraphicsRenderState,
     // Raw graphics bytes to forward verbatim to the host terminal (transparent
@@ -450,8 +448,6 @@ impl ShellPane {
             has_overflow: false,
             pty_rows: init_rows,
             pty_cols: init_cols,
-            alt_screen_active: false,
-            ansi_tail: Vec::new(),
             graphics_parser: GraphicsStreamParser::new(),
             graphics_render_state: GraphicsRenderState::default(),
             graphics_passthrough: Vec::new(),
@@ -511,7 +507,6 @@ impl ShellPane {
                 Ok(chunk) => {
                     processed_bytes = processed_bytes.saturating_add(chunk.len());
                     processed_chunks = processed_chunks.saturating_add(1);
-                    self.track_alt_screen_sequences(&chunk);
                     let query_replies = terminal_query_replies(
                         &chunk,
                         self.pty_rows,
@@ -728,7 +723,7 @@ impl ShellPane {
                     self.graphics_render_state.cache.len(),
                     self.graphics_render_state.cache_bytes,
                     hit_limit,
-                    self.alt_screen_active,
+                    self.in_alt_screen(),
                 ),
             );
         } else if self.output_debug_log.is_some() {
@@ -911,8 +906,14 @@ impl ShellPane {
         self.viewport_rows.max(1)
     }
 
+    /// Whether the child currently shows the alternate screen. Read from the
+    /// emulator so it always matches what is rendered: it follows every way the
+    /// emulator switches screens, including a full reset (`ESC c`, sent by
+    /// `reset`) and combined mode lists such as `ESC[?1049;1006h`. A child that
+    /// dies without leaving the alternate screen can then be recovered with
+    /// `reset`, as in a plain terminal.
     pub(crate) fn in_alt_screen(&self) -> bool {
-        self.alt_screen_active
+        self.parser.screen().alternate_screen()
     }
 
     pub(crate) fn is_running(&mut self) -> bool {
@@ -952,11 +953,6 @@ impl ShellPane {
             thread::sleep(Duration::from_millis(10));
         }
         self.terminate();
-    }
-
-    fn track_alt_screen_sequences(&mut self, chunk: &[u8]) {
-        self.alt_screen_active =
-            apply_alt_screen_chunk(self.alt_screen_active, &mut self.ansi_tail, chunk);
     }
 
     pub(crate) fn visible_cursor(&self, viewport_rows: u16, cols: u16) -> Option<(u16, u16)> {
