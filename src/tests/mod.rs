@@ -3,9 +3,9 @@ use super::{
     EffectiveIdentity, ExtensionCommandRule, GraphicsProtocol, LsColorsTheme, NavEntry,
     NavigationFileCommandAction, OutputDrain, PreviewCommandMode, PreviewMode,
     PreviewOverlayPresentation, RuntimeCommand, StreamEvent, available_preview_file_commands,
-    bash_history_sync_prompt_command, border_style, cd_to_bytes, child_mouse_capture_required,
-    clamp_nav_selection, clamp_preview_depth, compose_footer_line, config_panel_text,
-    copy_selection_shortcut, dedup_kitty_transfer, default_extension_rule,
+    bash_history_sync_prompt_command, border_style, cd_to_bytes, child_mouse_bytes,
+    child_mouse_capture_required, clamp_nav_selection, clamp_preview_depth, compose_footer_line,
+    config_panel_text, copy_selection_shortcut, dedup_kitty_transfer, default_extension_rule,
     default_history_file_for_shell, defer_repaint_for_graphics, duplicate_extension_for_rule,
     effective_access_from_mode, escape_prefix_arm_shortcut, escape_prefix_release_update,
     escape_prefix_shortcut_char, extension_validation_error_for_rule, first_duplicate_extension,
@@ -55,6 +55,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use vt100::Parser;
+use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 mod app_state_tests;
 mod config_tests;

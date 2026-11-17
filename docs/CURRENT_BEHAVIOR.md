@@ -24,6 +24,14 @@ This document describes how the current `src/main.rs` implementation behaves.
 
 - Left click on a panel focuses that panel.
 - Preview click focuses `Preview`.
+- Mouse events for a full-screen child (Shell pane on the alt screen, interactive Preview overlay)
+  are forwarded only the way the child asked for them, using the child's mouse mode and encoding
+  as tracked by the embedded emulator:
+  - no mouse reporting requested: wheel notches become `↑`/`↓` keys (3 per notch, in application
+    cursor form when the child enabled it), so programs like `less` scroll; other mouse events are
+    dropped
+  - mouse reporting requested: only the event kinds the mode covers are sent (press / release /
+    drag / motion), in the requested encoding (X10, UTF-8 or SGR)
 
 ## Navigation behavior
 
@@ -154,9 +162,12 @@ Interactive mode:
   - also enabled automatically while shell is in alt-screen mode
   - alt-screen mode is read from the embedded terminal emulator, so it follows every way a child
     switches screens, including a full reset (`ESC c`)
-  - if a full-screen child dies without leaving the alt screen (killed, crashed, dropped SSH
-    session), the pane stays in alt-screen mode, as a plain terminal would; run `reset` in the
-    Shell pane to recover
+  - automatic recovery: when the shell takes the terminal back from a foreground child (it
+    exited, was killed, crashed, or its SSH connection dropped), Navix resets what the child left
+    on in the emulator: alt screen, mouse reporting and a hidden cursor. Bracketed paste and
+    cursor-key/keypad modes are left alone because shells set them at the prompt
+  - not covered automatically: a remote program that dies while `ssh` itself keeps running (the
+    foreground is still `ssh`). Run `reset` on a clean prompt line (clear it with `Ctrl+C` first)
 - Navigation fullish:
   - toggled by `Esc+f` when active pane is `Navigation` or `Preview`
   - narrows preview panel for navigation-first workflow

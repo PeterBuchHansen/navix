@@ -1,5 +1,6 @@
 use super::*;
 use crate::ShellPane;
+use crate::shell::recover_stranded_child_modes;
 use std::path::Path;
 use std::time::Instant;
 
@@ -912,4 +913,119 @@ fn shell_pane_recovers_from_stranded_alt_screen_on_full_reset() {
         "pane stayed on alt screen after RIS"
     );
     pane.terminate();
+}
+
+fn poll_until(pane: &mut ShellPane, mut condition: impl FnMut(&ShellPane) -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        pane.poll_output();
+        if condition(pane) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+fn child_in_foreground(pane: &ShellPane) -> bool {
+    match (
+        pane.foreground_process_group_for_test(),
+        pane.shell_pid_for_test(),
+    ) {
+        (Some(pgid), Some(shell)) => u32::try_from(pgid).is_ok_and(|pgid| pgid != shell),
+        _ => false,
+    }
+}
+
+/// A job-control shell whose foreground child turns on the alternate screen,
+/// SGR mouse reporting and a hidden cursor, then idles until killed. After the
+/// child is gone the shell waits on `read`, i.e. it holds the foreground the way
+/// an interactive shell sits at its prompt.
+const STRANDING_CHILD_SCRIPT: &str =
+    "set -m; sh -c 'printf \"\\033[?1049h\\033[?1000h\\033[?1006h\\033[?25l\"; sleep 30'; read x";
+
+#[test]
+fn shell_pane_auto_recovers_modes_left_by_killed_foreground_child() {
+    let mut pane =
+        ShellPane::spawn_command(STRANDING_CHILD_SCRIPT, &std::env::temp_dir()).expect("spawn");
+    pane.enable_auto_recovery();
+    assert!(
+        poll_until(&mut pane, |pane| pane.in_alt_screen()
+            && child_in_foreground(pane)),
+        "child never took the foreground on the alt screen"
+    );
+    // A still-running child is never reset.
+    for _ in 0..20 {
+        pane.poll_output();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(pane.in_alt_screen());
+    assert_eq!(
+        pane.screen_for_test().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::PressRelease
+    );
+
+    let child_group = pane.foreground_process_group_for_test().expect("fg group");
+    unsafe {
+        libc::kill(-child_group, libc::SIGKILL);
+    }
+    assert!(
+        poll_until(&mut pane, |pane| {
+            let screen = pane.screen_for_test();
+            !screen.alternate_screen()
+                && screen.mouse_protocol_mode() == vt100::MouseProtocolMode::None
+                && screen.mouse_protocol_encoding() == vt100::MouseProtocolEncoding::Default
+                && !screen.hide_cursor()
+        }),
+        "pane did not recover after the child was killed"
+    );
+    pane.terminate();
+}
+
+#[test]
+fn shell_pane_without_auto_recovery_keeps_stranded_modes() {
+    // One-shot command sessions (Preview overlays) don't opt in.
+    let mut pane =
+        ShellPane::spawn_command(STRANDING_CHILD_SCRIPT, &std::env::temp_dir()).expect("spawn");
+    assert!(poll_until(&mut pane, |pane| pane.in_alt_screen()
+        && child_in_foreground(pane)));
+    let child_group = pane.foreground_process_group_for_test().expect("fg group");
+    unsafe {
+        libc::kill(-child_group, libc::SIGKILL);
+    }
+    assert!(poll_until(&mut pane, |pane| !child_in_foreground(pane)));
+    for _ in 0..10 {
+        pane.poll_output();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(pane.in_alt_screen());
+    pane.terminate();
+}
+
+#[test]
+fn recover_stranded_child_modes_keeps_shell_owned_modes() {
+    let mut parser = Parser::new(24, 80, 100);
+    // Child modes plus modes shells set themselves (bracketed paste, smkx).
+    parser.process(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[?2004h\x1b[?1h\x1b=");
+    assert!(recover_stranded_child_modes(&mut parser));
+    let screen = parser.screen();
+    assert!(!screen.alternate_screen());
+    assert_eq!(screen.mouse_protocol_mode(), vt100::MouseProtocolMode::None);
+    assert_eq!(
+        screen.mouse_protocol_encoding(),
+        vt100::MouseProtocolEncoding::Default
+    );
+    assert!(!screen.hide_cursor());
+    assert!(screen.bracketed_paste());
+    assert!(screen.application_cursor());
+    assert!(screen.application_keypad());
+}
+
+#[test]
+fn recover_stranded_child_modes_is_noop_on_clean_screen() {
+    let mut parser = Parser::new(24, 80, 100);
+    parser.process(b"prompt$ \x1b[?2004h");
+    let before = parser.screen().contents_formatted();
+    assert!(!recover_stranded_child_modes(&mut parser));
+    assert_eq!(parser.screen().contents_formatted(), before);
 }
