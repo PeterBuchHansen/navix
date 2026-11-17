@@ -43,15 +43,20 @@ use super::{
     terminal_prefers_command_copy_from_env, terminal_query_replies_for_test, visible_range,
     window_bounds,
 };
+use super::{
+    CommandSlotMode, cycle_command_mask, normalize_command_mask, preview_file_command_entries,
+};
 use super::{TemplateQuoteContext, encode_file_name_for_context};
 use crossterm::event::{
     KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Text;
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use vt100::Parser;

@@ -22,6 +22,81 @@ pub(crate) struct ExtensionCommandRule {
     pub(crate) read_cmd: String,
     pub(crate) write_cmd: String,
     pub(crate) exec_cmd: String,
+    /// Per-command visibility and permission check, written like `ls` bits:
+    /// position 0 = read, 1 = write, 2 = exec. Lowercase shows the command and
+    /// checks the matching file permission, uppercase (`X`) shows it without the
+    /// check, and `-` hides it from Preview and the config editor (the command
+    /// text is kept so switching back restores it).
+    #[serde(default = "default_command_mask")]
+    pub(crate) command_mask: String,
+}
+
+pub(crate) const DEFAULT_COMMAND_MASK: &str = "rwx";
+
+fn default_command_mask() -> String {
+    DEFAULT_COMMAND_MASK.to_string()
+}
+
+/// Allowed characters per mask position, in `Enter` cycle order. Read and
+/// write cannot skip their permission check (yet); exec can via `X`.
+pub(crate) fn command_mask_options(position: usize) -> &'static [char] {
+    match position {
+        0 => &['r', '-'],
+        1 => &['w', '-'],
+        _ => &['x', 'X', '-'],
+    }
+}
+
+/// Keep valid characters; any missing or invalid position falls back to its
+/// default so a typo never hides a command by accident.
+pub(crate) fn normalize_command_mask(raw: &str) -> String {
+    let chars: Vec<char> = raw.trim().chars().collect();
+    (0..3)
+        .map(|position| {
+            let options = command_mask_options(position);
+            chars
+                .get(position)
+                .copied()
+                .filter(|ch| options.contains(ch))
+                .unwrap_or(options[0])
+        })
+        .collect()
+}
+
+/// Advance one mask position to its next allowed character.
+pub(crate) fn cycle_command_mask(mask: &str, position: usize) -> String {
+    let mut chars: Vec<char> = normalize_command_mask(mask).chars().collect();
+    let options = command_mask_options(position);
+    let current = options
+        .iter()
+        .position(|option| *option == chars[position])
+        .unwrap_or(0);
+    chars[position] = options[(current + 1) % options.len()];
+    chars.into_iter().collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandSlotMode {
+    /// Shown; enabled only with the matching effective file permission.
+    Checked,
+    /// Shown; permission check skipped.
+    Unchecked,
+    /// Not shown anywhere and cannot be triggered.
+    Hidden,
+}
+
+impl ExtensionCommandRule {
+    /// Mode of the command at `position` (0 = read, 1 = write, 2 = exec).
+    pub(crate) fn command_slot_mode(&self, position: usize) -> CommandSlotMode {
+        match normalize_command_mask(&self.command_mask)
+            .chars()
+            .nth(position)
+        {
+            Some('-') => CommandSlotMode::Hidden,
+            Some(ch) if ch.is_ascii_uppercase() => CommandSlotMode::Unchecked,
+            _ => CommandSlotMode::Checked,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,18 +114,21 @@ impl Default for ConfigState {
                     read_cmd: "bat {file}".to_string(),
                     write_cmd: "$EDITOR {file}".to_string(),
                     exec_cmd: "mdterm {file}".to_string(),
+                    command_mask: default_command_mask(),
                 },
                 ExtensionCommandRule {
                     extension: "json".to_string(),
                     read_cmd: "jq . {file}".to_string(),
                     write_cmd: "$EDITOR {file}".to_string(),
                     exec_cmd: "fx {file}".to_string(),
+                    command_mask: default_command_mask(),
                 },
                 ExtensionCommandRule {
                     extension: "sh".to_string(),
                     read_cmd: "bat {file}".to_string(),
                     write_cmd: "$EDITOR {file}".to_string(),
                     exec_cmd: "bash {file}".to_string(),
+                    command_mask: default_command_mask(),
                 },
             ],
         }
@@ -126,6 +204,7 @@ impl ConfigState {
             rule.read_cmd = Self::normalize_command_template(&rule.read_cmd);
             rule.write_cmd = Self::normalize_command_template(&rule.write_cmd);
             rule.exec_cmd = Self::normalize_command_template(&rule.exec_cmd);
+            rule.command_mask = normalize_command_mask(&rule.command_mask);
         }
     }
 }
@@ -133,15 +212,20 @@ impl ConfigState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigField {
     Extension,
+    /// One character of `command_mask`: 0 = read, 1 = write, 2 = exec.
+    CommandMask(usize),
     Read,
     Write,
     Exec,
 }
 
 impl ConfigField {
+    /// Raw field order, matching the on-screen layout.
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::Extension => Self::Read,
+            Self::Extension => Self::CommandMask(0),
+            Self::CommandMask(position) if position < 2 => Self::CommandMask(position + 1),
+            Self::CommandMask(_) => Self::Read,
             Self::Read => Self::Write,
             Self::Write => Self::Exec,
             Self::Exec => Self::Extension,
@@ -151,15 +235,48 @@ impl ConfigField {
     pub(crate) fn prev(self) -> Self {
         match self {
             Self::Extension => Self::Exec,
-            Self::Read => Self::Extension,
+            Self::CommandMask(0) => Self::Extension,
+            Self::CommandMask(position) => Self::CommandMask(position - 1),
+            Self::Read => Self::CommandMask(2),
             Self::Write => Self::Read,
             Self::Exec => Self::Write,
         }
     }
 
+    /// Whether this field is on screen for `rule` (commands hidden by the mask
+    /// are skipped by navigation).
+    pub(crate) fn visible_in(self, rule: &ExtensionCommandRule) -> bool {
+        let position = match self {
+            Self::Read => 0,
+            Self::Write => 1,
+            Self::Exec => 2,
+            Self::Extension | Self::CommandMask(_) => return true,
+        };
+        rule.command_slot_mode(position) != CommandSlotMode::Hidden
+    }
+
+    /// Next field that is visible for `rule`. Always terminates because the
+    /// extension and mask fields are never hidden.
+    pub(crate) fn next_in(self, rule: &ExtensionCommandRule) -> Self {
+        let mut field = self.next();
+        while !field.visible_in(rule) {
+            field = field.next();
+        }
+        field
+    }
+
+    pub(crate) fn prev_in(self, rule: &ExtensionCommandRule) -> Self {
+        let mut field = self.prev();
+        while !field.visible_in(rule) {
+            field = field.prev();
+        }
+        field
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Extension => "extension",
+            Self::CommandMask(_) => "command-mask",
             Self::Read => "read",
             Self::Write => "write",
             Self::Exec => "exec",
@@ -200,6 +317,13 @@ impl ConfigEditor {
             self.selected_rule
                 .min(config.extension_rules.len().saturating_sub(1))
         };
+        // Moving to a rule that hides the selected command lands on the next
+        // visible field instead of an invisible one.
+        if let Some(rule) = config.extension_rules.get(self.selected_rule)
+            && !self.selected_field.visible_in(rule)
+        {
+            self.selected_field = self.selected_field.next_in(rule);
+        }
     }
 
     pub(crate) fn clear_input(&mut self) {
