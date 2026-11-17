@@ -43,6 +43,7 @@ use super::{
     terminal_prefers_command_copy_from_env, terminal_query_replies_for_test, visible_range,
     window_bounds,
 };
+use super::{TemplateQuoteContext, encode_file_name_for_context};
 use crossterm::event::{
     KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
