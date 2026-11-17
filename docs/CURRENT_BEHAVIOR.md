@@ -152,6 +152,11 @@ Interactive mode:
 - Shell fullish:
   - toggled by `Esc+f` when active pane is `Shell`
   - also enabled automatically while shell is in alt-screen mode
+  - alt-screen mode is read from the embedded terminal emulator, so it follows every way a child
+    switches screens, including a full reset (`ESC c`)
+  - if a full-screen child dies without leaving the alt screen (killed, crashed, dropped SSH
+    session), the pane stays in alt-screen mode, as a plain terminal would; run `reset` in the
+    Shell pane to recover
 - Navigation fullish:
   - toggled by `Esc+f` when active pane is `Navigation` or `Preview`
   - narrows preview panel for navigation-first workflow

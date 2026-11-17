@@ -47,7 +47,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-mod alt_screen;
 mod app_state;
 mod config;
 mod config_ui;
@@ -66,8 +65,6 @@ mod theme;
 mod tui;
 
 #[cfg(test)]
-pub(crate) use alt_screen::alt_screen_event_from_stream;
-pub(crate) use alt_screen::apply_alt_screen_chunk;
 #[cfg(test)]
 pub(crate) use app_state::{
     normalize_preview_jump_input_text_for_test, preview_jump_completion_candidates_for_test,

@@ -8,6 +8,10 @@ All notable changes to this project are documented here.
 
 - `{file}` in extension command templates is now escaped for the shell quoting context it appears in (unquoted, `"…"` or `'…'`) and plain names are inserted unchanged, so templates such as `smbclient -c "print {file}"` receive the real file name instead of a literally quoted one. `{file_raw}` is kept as a legacy alias of `{file}` (#25).
 
+### Fixed
+
+- Shell pane no longer stays stuck in alt-screen mode (fullish layout, hidden scrollback, mouse-wheel escape codes leaking onto the prompt) after a full-screen child exits abruptly: alt-screen state is now read from the embedded emulator, so `reset` recovers it as in a plain terminal, and combined mode lists such as `ESC[?1006;1049h` are honoured (#24).
+
 ## [0.3.4] - 2026-06-19
 
 Host-directed terminal side channels that nested tools emit in the Shell and
