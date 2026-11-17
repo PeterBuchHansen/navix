@@ -146,7 +146,9 @@ pub(crate) use state::{
     PanePoint, PanelSelection, PreviewCommandMode, PreviewMode, PreviewOverlayPresentation,
     RenderTextSnapshot, merge_output_drains, should_composited_redraw,
 };
-pub(crate) use terminal_keys::{terminal_key_bytes, terminal_mouse_bytes};
+#[cfg(test)]
+pub(crate) use terminal_keys::terminal_mouse_bytes;
+pub(crate) use terminal_keys::{child_mouse_bytes, terminal_key_bytes};
 pub(crate) use terminal_runtime::{
     TerminalGuard, ensure_editor_program, open_copy_key_debug_log, open_key_debug_log,
     open_output_debug_log, to_io,

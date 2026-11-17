@@ -102,6 +102,11 @@ pub(crate) struct ShellPane {
     writer: Box<dyn Write + Send>,
     rx: Receiver<Vec<u8>>,
     parser: Parser<BellCallbacks>,
+    // Reset modes a dead child left on once the shell takes the terminal back
+    // (main Shell pane only; see `recover_if_shell_regained_foreground`).
+    auto_recover_stranded_modes: bool,
+    // Whether another process group held the PTY foreground at the last poll.
+    foreground_was_child: bool,
     scroll_offset: usize,
     viewport_rows: usize,
     has_overflow: bool,
@@ -371,7 +376,41 @@ impl ShellPane {
             command.env("PROMPT_COMMAND", prompt_command);
         }
         apply_history_defaults(&mut command, &shell_program, &shell_path);
-        Self::spawn_from_command_builder(command, cwd, 40, 160)
+        let mut pane = Self::spawn_from_command_builder(command, cwd, 40, 160)?;
+        pane.enable_auto_recovery();
+        Ok(pane)
+    }
+
+    /// Opt in to resetting modes a dead full-screen child left on when the
+    /// shell regains the PTY foreground. Meant for an interactive shell; a
+    /// one-shot command session has no prompt to return to.
+    pub(crate) fn enable_auto_recovery(&mut self) {
+        self.auto_recover_stranded_modes = true;
+    }
+
+    /// Detect the PTY foreground passing back from another process group to
+    /// the shell (a full-screen child exited, was killed, or its SSH session
+    /// dropped) and reset what that child may have stranded. Runs before this
+    /// tick's output is processed, so the shell's new prompt lands on the main
+    /// screen instead of the stale alternate screen.
+    fn recover_if_shell_regained_foreground(&mut self) {
+        if !self.auto_recover_stranded_modes {
+            return;
+        }
+        let (Some(shell_pid), Some(foreground)) =
+            (self.child.process_id(), self.master.process_group_leader())
+        else {
+            return;
+        };
+        let shell_in_front = u32::try_from(foreground).is_ok_and(|pgid| pgid == shell_pid);
+        let regained = self.foreground_was_child && shell_in_front;
+        self.foreground_was_child = !shell_in_front;
+        if regained && recover_stranded_child_modes(&mut self.parser) {
+            self.log_output_event(
+                "auto_recover",
+                "reset modes left by exited foreground child",
+            );
+        }
     }
 
     pub(crate) fn spawn_command(command_line: &str, cwd: &Path) -> io::Result<Self> {
@@ -443,6 +482,8 @@ impl ShellPane {
                 shell_scrollback_limit(),
                 BellCallbacks::default(),
             ),
+            auto_recover_stranded_modes: false,
+            foreground_was_child: false,
             scroll_offset: 0,
             viewport_rows: 1,
             has_overflow: false,
@@ -482,6 +523,7 @@ impl ShellPane {
             .map(|t| t.elapsed().as_millis())
             .unwrap_or(0);
         self.last_poll_instant = Some(poll_start);
+        self.recover_if_shell_regained_foreground();
         let mut processed_chunks = 0usize;
         let mut processed_bytes = 0usize;
         let mut processed_graphics_events = 0usize;
@@ -869,8 +911,18 @@ impl ShellPane {
         Ok(())
     }
 
+    /// Forward a mouse event only in the form the child asked for (see
+    /// `child_mouse_bytes`); unrequested events are dropped instead of leaking
+    /// onto the child's input as escape sequences.
     pub(crate) fn send_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> io::Result<()> {
-        let bytes = terminal_mouse_bytes(mouse);
+        let screen = self.parser.screen();
+        let bytes = child_mouse_bytes(
+            mouse,
+            screen.mouse_protocol_mode(),
+            screen.mouse_protocol_encoding(),
+            screen.alternate_screen(),
+            screen.application_cursor(),
+        );
         if !bytes.is_empty() {
             self.send_raw(&bytes)?;
         }
@@ -914,6 +966,21 @@ impl ShellPane {
     /// `reset`, as in a plain terminal.
     pub(crate) fn in_alt_screen(&self) -> bool {
         self.parser.screen().alternate_screen()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn foreground_process_group_for_test(&self) -> Option<libc::pid_t> {
+        self.master.process_group_leader()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shell_pid_for_test(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn screen_for_test(&self) -> &vt100::Screen {
+        self.parser.screen()
     }
 
     pub(crate) fn is_running(&mut self) -> bool {
@@ -1173,6 +1240,33 @@ impl Drop for ShellPane {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Reset, in the local emulator only, the modes a dead full-screen child may
+/// have left on: alternate screen, mouse reporting and a hidden cursor.
+/// Bracketed paste and cursor-key/keypad modes are left alone because shells
+/// set those themselves at the prompt. Returns whether anything was reset.
+pub(crate) fn recover_stranded_child_modes<CB: vt100::Callbacks>(parser: &mut Parser<CB>) -> bool {
+    let screen = parser.screen();
+    let mut reset = Vec::new();
+    if screen.alternate_screen() {
+        reset.extend_from_slice(b"\x1b[?1049l");
+    }
+    if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+        || screen.mouse_protocol_encoding() != vt100::MouseProtocolEncoding::Default
+    {
+        reset.extend_from_slice(
+            b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l",
+        );
+    }
+    if screen.hide_cursor() {
+        reset.extend_from_slice(b"\x1b[?25h");
+    }
+    if reset.is_empty() {
+        return false;
+    }
+    parser.process(&reset);
+    true
 }
 
 pub(crate) fn shell_single_quote(input: &str) -> String {

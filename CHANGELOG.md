@@ -10,6 +10,8 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
+- Shell pane and interactive Preview overlays forward mouse events only as the child requested them (mode and X10/UTF-8/SGR encoding); without mouse reporting, wheel notches on the alt screen become arrow keys instead of leaking `<64;…M` onto the input (#30).
+- Shell pane resets modes a dead full-screen child left on (alt screen, mouse reporting, hidden cursor) as soon as the shell takes the terminal back, so no `reset` is needed after a killed or crashed TUI or a dropped SSH session (#30).
 - Shell pane no longer stays stuck in alt-screen mode (fullish layout, hidden scrollback, mouse-wheel escape codes leaking onto the prompt) after a full-screen child exits abruptly: alt-screen state is now read from the embedded emulator, so `reset` recovers it as in a plain terminal, and combined mode lists such as `ESC[?1006;1049h` are honoured (#24).
 
 ## [0.3.4] - 2026-06-19

@@ -15,6 +15,11 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+
+/// Arrow-key presses sent per wheel notch to a full-screen child that did not
+/// enable mouse reporting ("alternate scroll", as in xterm).
+const ALTERNATE_SCROLL_LINES: usize = 3;
 
 fn csi_modifier_param(modifiers: KeyModifiers) -> Option<u8> {
     let mut value = 1_u8;
@@ -137,7 +142,8 @@ pub(crate) fn terminal_key_bytes(code: KeyCode, modifiers: KeyModifiers) -> Vec<
     }
 }
 
-pub(crate) fn terminal_mouse_bytes(mouse: MouseEvent) -> Vec<u8> {
+/// Button code (modifiers included) and SGR suffix for a mouse event.
+fn mouse_event_code(mouse: MouseEvent) -> (u16, char) {
     let modifier_flags = mouse_modifier_flags(mouse.modifiers);
     let (base_code, suffix) = match mouse.kind {
         MouseEventKind::Down(button) => (mouse_button_code(button).unwrap_or(0), 'M'),
@@ -149,10 +155,91 @@ pub(crate) fn terminal_mouse_bytes(mouse: MouseEvent) -> Vec<u8> {
         MouseEventKind::ScrollLeft => (66, 'M'),
         MouseEventKind::ScrollRight => (67, 'M'),
     };
-    let code = base_code + modifier_flags;
+    (base_code + modifier_flags, suffix)
+}
+
+/// SGR (`CSI < … M/m`) encoding of a mouse event.
+pub(crate) fn terminal_mouse_bytes(mouse: MouseEvent) -> Vec<u8> {
+    let (code, suffix) = mouse_event_code(mouse);
     let col = mouse.column.saturating_add(1);
     let row = mouse.row.saturating_add(1);
     format!("\x1b[<{code};{col};{row}{suffix}").into_bytes()
+}
+
+/// Legacy `CSI M Cb Cx Cy` encoding: X10 bytes (`utf8 == false`) or the UTF-8
+/// extension (mode 1005). Events whose values don't fit the encoding are dropped.
+fn legacy_mouse_bytes(mouse: MouseEvent, utf8: bool) -> Vec<u8> {
+    let (code, _) = mouse_event_code(mouse);
+    let values = [
+        u32::from(code) + 32,
+        u32::from(mouse.column) + 1 + 32,
+        u32::from(mouse.row) + 1 + 32,
+    ];
+    let mut out = b"\x1b[M".to_vec();
+    for value in values {
+        if utf8 {
+            match char::from_u32(value).filter(|_| value <= 2047) {
+                Some(ch) => {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                },
+                None => return Vec::new(),
+            }
+        } else {
+            match u8::try_from(value) {
+                Ok(byte) => out.push(byte),
+                Err(_) => return Vec::new(),
+            }
+        }
+    }
+    out
+}
+
+/// Bytes for a mouse event as the child asked for it (vt100's view of the
+/// child's mouse mode and encoding). A child that never enabled mouse
+/// reporting gets nothing, except wheel notches on the alternate screen,
+/// which become arrow keys so full-screen programs such as `less` scroll.
+pub(crate) fn child_mouse_bytes(
+    mouse: MouseEvent,
+    mode: MouseProtocolMode,
+    encoding: MouseProtocolEncoding,
+    alternate_screen: bool,
+    application_cursor: bool,
+) -> Vec<u8> {
+    if mode == MouseProtocolMode::None {
+        if !alternate_screen {
+            return Vec::new();
+        }
+        let arrow: &[u8] = match (mouse.kind, application_cursor) {
+            (MouseEventKind::ScrollUp, false) => b"\x1b[A",
+            (MouseEventKind::ScrollUp, true) => b"\x1bOA",
+            (MouseEventKind::ScrollDown, false) => b"\x1b[B",
+            (MouseEventKind::ScrollDown, true) => b"\x1bOB",
+            _ => return Vec::new(),
+        };
+        return arrow.repeat(ALTERNATE_SCROLL_LINES);
+    }
+    let reported = match mouse.kind {
+        MouseEventKind::Down(_)
+        | MouseEventKind::ScrollUp
+        | MouseEventKind::ScrollDown
+        | MouseEventKind::ScrollLeft
+        | MouseEventKind::ScrollRight => true,
+        MouseEventKind::Up(_) => mode != MouseProtocolMode::Press,
+        MouseEventKind::Drag(_) => matches!(
+            mode,
+            MouseProtocolMode::ButtonMotion | MouseProtocolMode::AnyMotion
+        ),
+        MouseEventKind::Moved => mode == MouseProtocolMode::AnyMotion,
+    };
+    if !reported {
+        return Vec::new();
+    }
+    match encoding {
+        MouseProtocolEncoding::Sgr => terminal_mouse_bytes(mouse),
+        MouseProtocolEncoding::Default => legacy_mouse_bytes(mouse, false),
+        MouseProtocolEncoding::Utf8 => legacy_mouse_bytes(mouse, true),
+    }
 }
 
 fn mouse_button_code(button: MouseButton) -> Option<u16> {
